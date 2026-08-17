@@ -7,19 +7,16 @@ export default {
     const requirePassword = env.REQUIRE_PASSWORD === 'true';
     const allowedPasswords = parseAllowedPasswords(env.ALLOWED_PASSWORDS);
 
-    // 处理 API 请求
     if (path.startsWith('/api/')) {
       return handleApiRequest(request, env, ctx, requirePassword, allowedPasswords);
     }
 
-    // 首页
     if (path === '/') {
       return new Response(getHomePage(), {
         headers: { 'Content-Type': 'text/html; charset=utf-8' }
       });
     }
 
-    // 剪贴板页面
     const name = decodeURIComponent(path.slice(1));
     if (name.includes('/')) {
       return new Response('Not Found', { status: 404 });
@@ -45,7 +42,6 @@ export default {
   }
 };
 
-// ---------- API 处理 ----------
 async function handleApiRequest(request, env, ctx, requirePassword, allowedPasswords) {
   const url = new URL(request.url);
   const path = url.pathname;
@@ -70,7 +66,6 @@ async function handleApiRequest(request, env, ctx, requirePassword, allowedPassw
   return jsonResponse({ error: 'API endpoint not found' }, 404);
 }
 
-// ---------- 核心操作 ----------
 async function createClipboard(body, env, requirePassword, allowedPasswords) {
   const { name, content, password, expiresInDays } = body;
   if (!name || typeof name !== 'string' || name.trim() === '') {
@@ -104,8 +99,8 @@ async function createClipboard(body, env, requirePassword, allowedPasswords) {
     expiresInDays: days
   };
 
-  const ttl = daysToSeconds(days);
-  await env.CLIPBOARD_KV.put(name, JSON.stringify(data), ttl ? { expirationTtl: ttl } : {});
+  const options = days > 0 ? { expirationTtl: daysToSeconds(days) } : {};
+  await env.CLIPBOARD_KV.put(name, JSON.stringify(data), options);
 
   return jsonResponse({ success: true, expiresInDays: days });
 }
@@ -147,8 +142,8 @@ async function updateClipboard(body, env) {
 
   data.content = content;
   data.updatedAt = Date.now();
-  const ttl = daysToSeconds(data.expiresInDays);
-  await env.CLIPBOARD_KV.put(name, JSON.stringify(data), ttl ? { expirationTtl: ttl } : {});
+  const options = data.expiresInDays > 0 ? { expirationTtl: daysToSeconds(data.expiresInDays) } : {};
+  await env.CLIPBOARD_KV.put(name, JSON.stringify(data), options);
 
   return jsonResponse({ success: true });
 }
@@ -170,7 +165,6 @@ async function deleteClipboard(body, env) {
   return jsonResponse({ success: true });
 }
 
-// ---------- 辅助函数 ----------
 function jsonResponse(obj, status = 200) {
   return new Response(JSON.stringify(obj), {
     status,
@@ -186,8 +180,11 @@ async function sha256(text) {
 }
 
 function getValidExpiration(days) {
-  const validDays = [1, 3, 7, 14, 30];
-  if (typeof days === 'number' && validDays.includes(days)) return days;
+  // 支持 0 表示永不删除
+  const validDays = [0, 1, 3, 7, 14, 30];
+  if (typeof days === 'number' && validDays.includes(days)) {
+    return days;
+  }
   return 3; // 默认 3 天
 }
 
@@ -217,8 +214,7 @@ function getHomePage() {
 <body class="bg-gray-50 min-h-screen flex items-center justify-center">
   <div class="text-center px-4">
     <h1 class="text-5xl font-bold text-gray-900 mb-4">☁️ 云剪贴板</h1>
-    <p class="text-xl text-gray-600 mb-8">在地址栏输入 <code class="bg-gray-200 px-2 py-1 rounded">域名.com/剪贴板名</code> 即可新建或打开</p>
-    <a href="/example" class="inline-block bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 transition">试试 /example</a>
+    <p class="text-xl text-gray-600">在地址栏输入 <code class="bg-gray-200 px-2 py-1 rounded">域名.com/剪贴板名</code> 即可新建或打开</p>
   </div>
 </body>
 </html>`;
@@ -252,6 +248,7 @@ function getCreatePage(name, requirePassword, allowedPasswords) {
       <div class="mb-6">
         <label class="block text-sm font-medium text-gray-700 mb-1">自动删除时长</label>
         <select id="expiresInDays" class="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+          <option value="0">永不删除</option>
           <option value="1">1 天</option>
           <option value="3" selected>3 天</option>
           <option value="7">7 天</option>
@@ -303,22 +300,18 @@ function getCreatePage(name, requirePassword, allowedPasswords) {
 
 function getOpenPage(meta) {
   const { name, hasPassword, createdAt, updatedAt, expiresInDays } = meta;
+  const expiryText = expiresInDays === 0 ? '永不删除' : `${expiresInDays} 天后自动删除`;
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>剪贴板 - ${escapeHtml(name)}</title>
-  <!-- Tailwind CSS -->
   <script src="https://cdn.tailwindcss.com"></script>
-  <!-- markdown-it -->
   <script src="https://cdn.jsdelivr.net/npm/markdown-it@13/dist/markdown-it.min.js"></script>
-  <!-- KaTeX -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
   <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
-  <!-- markdown-it-texmath 插件 -->
   <script src="https://cdn.jsdelivr.net/npm/markdown-it-texmath@1.0.0/texmath.min.js"></script>
-  <!-- highlight.js 代码高亮 -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github.min.css">
   <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/common.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/markdown.min.js"></script>
@@ -326,7 +319,6 @@ function getOpenPage(meta) {
     .markdown-body { line-height: 1.6; }
     .markdown-body pre { background: #f6f8fa; padding: 1em; border-radius: 6px; overflow-x: auto; }
     .katex { font-size: 1.1em; }
-    /* 全屏布局 */
     body, html { height: 100%; }
     .app-container { min-height: 100vh; display: flex; flex-direction: column; }
     .content-area { flex: 1; overflow-y: auto; }
@@ -347,11 +339,10 @@ function getOpenPage(meta) {
       </div>
     </div>
     <div id="contentSection" class="${hasPassword ? 'hidden' : ''} flex-1 flex flex-col">
-      <!-- 顶部工具栏 -->
       <div class="bg-white border-b border-gray-200 px-4 py-3 flex items-center justify-between flex-wrap gap-2 shadow-sm">
         <div>
           <h1 class="text-xl font-bold">📋 ${escapeHtml(name)}</h1>
-          <p class="text-xs text-gray-500">创建于 ${new Date(createdAt).toLocaleString()} · ${expiresInDays} 天后自动删除</p>
+          <p class="text-xs text-gray-500">创建于 ${new Date(createdAt).toLocaleString()} · ${expiryText}</p>
         </div>
         <div class="flex space-x-2">
           <button id="copyBtn" class="bg-gray-200 hover:bg-gray-300 text-gray-800 px-4 py-2 rounded-lg text-sm">复制</button>
@@ -359,7 +350,6 @@ function getOpenPage(meta) {
           <button id="deleteBtn" class="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg text-sm">删除</button>
         </div>
       </div>
-      <!-- 内容区域（全屏） -->
       <div class="content-area p-6">
         <div id="previewMode">
           <div id="contentDisplay" class="markdown-body bg-white rounded-xl shadow p-6 max-w-4xl mx-auto"></div>
@@ -391,15 +381,12 @@ function getOpenPage(meta) {
     let currentPassword = '';
     let originalMarkdown = '';
 
-    // 初始化 markdown-it
     const md = window.markdownit({
       html: false,
       linkify: true,
       highlight: function (str, lang) {
         if (lang && hljs.getLanguage(lang)) {
-          try {
-            return hljs.highlight(str, { language: lang }).value;
-          } catch (__) {}
+          try { return hljs.highlight(str, { language: lang }).value; } catch (__) {}
         }
         return '';
       }
@@ -409,9 +396,7 @@ function getOpenPage(meta) {
       katexOptions: { throwOnError: false }
     });
 
-    function renderMarkdown(text) {
-      return md.render(text);
-    }
+    function renderMarkdown(text) { return md.render(text); }
 
     function showPreview() {
       document.getElementById('contentDisplay').innerHTML = renderMarkdown(originalMarkdown);
@@ -455,9 +440,7 @@ function getOpenPage(meta) {
             alert(data.error || '加载失败');
           }
         }
-      } catch (err) {
-        alert('网络错误');
-      }
+      } catch (err) { alert('网络错误'); }
     }
 
     async function copyContent() {
@@ -481,10 +464,7 @@ function getOpenPage(meta) {
 
     document.getElementById('verifyBtn').addEventListener('click', async () => {
       const pwd = document.getElementById('passwordInput').value;
-      if (!pwd) {
-        document.getElementById('passwordError').textContent = '请输入密码';
-        return;
-      }
+      if (!pwd) { document.getElementById('passwordError').textContent = '请输入密码'; return; }
       currentPassword = pwd;
       loadContent(pwd);
     });
@@ -513,9 +493,7 @@ function getOpenPage(meta) {
             document.getElementById('contentSection').classList.add('hidden');
           }
         }
-      } catch (err) {
-        document.getElementById('editError').textContent = '网络错误';
-      }
+      } catch (err) { document.getElementById('editError').textContent = '网络错误'; }
     });
 
     document.getElementById('deleteBtn').addEventListener('click', async () => {
@@ -536,15 +514,10 @@ function getOpenPage(meta) {
             document.getElementById('contentSection').classList.add('hidden');
           }
         }
-      } catch (err) {
-        alert('网络错误');
-      }
+      } catch (err) { alert('网络错误'); }
     });
 
-    // 初始加载
-    if (!hasPassword) {
-      loadContent('');
-    }
+    if (!hasPassword) { loadContent(''); }
   </script>
 </body>
 </html>`;
