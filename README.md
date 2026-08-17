@@ -1,44 +1,84 @@
-# 云剪贴板
+# 云剪贴板（D1 版）
 
-一个基于 **Cloudflare Workers + KV** 的轻量级在线剪贴板，提供美观的全屏界面，支持 Markdown、LaTeX 数学公式、代码高亮、密码保护、自动过期、实时编辑预览和一键复制。
+一个基于 **Cloudflare Workers + D1** 的现代在线剪贴板，支持 Markdown、LaTeX 数学公式、代码高亮、密码保护、自动过期、实时编辑预览和一键复制。数据存储在 D1 数据库中，具备并发安全（主键唯一约束）和定时清理过期数据的能力。
 
 ---
 
 ## ✨ 功能特性
 
-- 🎨 **现代 UI**：基于 Tailwind CSS，简洁美观，响应式设计，移动端友好。
+- 🖥️ **全屏布局**：剪贴板页面充满视口，顶部工具栏固定，内容区域自适应滚动。
+- 🎨 **现代 UI**：基于 Tailwind CSS，简洁美观，响应式设计。
 - 📝 **Markdown 渲染**：使用 `markdown-it`，安全（默认不支持原始 HTML），支持 GFM。
 - 🔢 **LaTeX 数学公式**：通过 `markdown-it-texmath` + `KaTeX` 渲染 `$...$` 和 `$$...$$`。
 - 🌈 **代码高亮**：集成 `highlight.js`，支持多种编程语言。
 - 🔒 **密码保护**：可选密码，使用 SHA-256 哈希存储，可配置强制密码和白名单。
-- ⏱️ **自动过期**：可设置 1/3/7/14/30 天，默认 3 天，基于 KV 的 `expirationTtl` 自动删除。
+- ⏱️ **自动过期**：可设置 0（永不删除）、1、3、7、14、30 天，默认 3 天；通过 Cron 触发器每小时清理过期数据。
 - ✍️ **实时编辑预览**：左右分屏，边输入边渲染。
 - 📋 **一键复制**：复制原始 Markdown 内容。
 - 🔄 **同源部署**：前端与 API 集成在同一个 Worker 中，无跨域问题，API 地址不暴露。
+- 🛡️ **并发安全**：使用 D1 主键唯一约束，防止两个人同时创建同名剪贴板时互相覆盖。
+
+---
+
+## 🏗️ 架构
+
+- **后端**：Cloudflare Worker 提供 REST API，数据存储在 D1 数据库中。
+- **前端**：由 Worker 直接返回 HTML 页面（包含 CSS 和 JavaScript），使用 `fetch` 调用同域 `/api/*` 接口。
+- **定时任务**：Worker 的 `scheduled` 事件每小时执行一次，删除 `expires_at` 小于当前时间的记录。
 
 ---
 
 ## 🚀 部署步骤
 
-### 1. 创建 KV 命名空间
+### 1. 创建 D1 数据库并初始化表
 
 1. 登录 [Cloudflare Dashboard](https://dash.cloudflare.com)。
-2. 进入 **Workers & Pages** → **KV**。
-3. 点击 **Create namespace**，命名为 `CLIPBOARD_KV`（或任意名称），复制其 ID。
+2. 进入 **Workers & Pages** → **D1**。
+3. 点击 **Create database**，命名例如 `clipboard-db`，记下数据库 ID。
+4. 进入该数据库的 **Console** 或 **SQL** 标签页，执行以下两条 SQL 语句（请分开执行，不要添加注释）：
 
-### 2. 创建 Worker 并部署代码
+**第一条：创建表**
+```sql
+CREATE TABLE clipboards (
+  name TEXT PRIMARY KEY,
+  content TEXT NOT NULL,
+  password_hash TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  expires_in_days INTEGER NOT NULL DEFAULT 0,
+  expires_at INTEGER
+);
+```
+
+**第二条：创建索引**
+```sql
+CREATE INDEX idx_expires_at ON clipboards(expires_at);
+```
+
+> **注意**：D1 控制台可能不支持一次执行多条语句或带注释的 SQL，请务必分开执行上述两条语句。
+
+### 2. 创建 Worker 并粘贴代码
 
 1. 进入 **Workers & Pages** → **Create application** → **Create Worker**。
 2. 给你的 Worker 命名，例如 `cloud-clipboard`。
-3. 将本项目中的 `index.js` 完整代码粘贴到 Worker 编辑器中。
+3. 将本项目中的 Worker 代码（见下文）完整粘贴到编辑器中。
 4. 点击 **Settings** → **Variables**。
-5. 在 **KV namespace bindings** 下，添加绑定：
-   - **Variable name**: `CLIPBOARD_KV`
-   - **KV namespace**: 选择你在第 1 步创建的命名空间。
-6. （可选）在 **Environment Variables** 下，添加配置变量（见下文）。
+5. 在 **D1 database bindings** 下，添加绑定：
+   - **Variable name**: `DB`
+   - **D1 database**: 选择你在第 1 步创建的数据库。
+6. （可选）在 **Environment Variables** 下添加配置变量（见“环境变量配置”）。
 7. 点击 **Save and Deploy**。
 
-### 3. 访问使用
+### 3. 配置定时清理（Cron Trigger）
+
+1. 进入 Worker 页面，点击 **Triggers** 标签（中文界面为“触发器”）。
+2. 点击 **Add Cron Trigger**。
+3. 输入 Cron 表达式 `0 * * * *`（每小时整点执行一次）。
+4. 保存。
+
+（由于Cloudflare的页面一直在更新所以可能位置有变化）
+
+### 4. 访问使用
 
 - 打开你的 Worker 域名（例如 `https://your-worker.workers.dev`），即可看到首页。
 - 访问 `https://your-worker.workers.dev/任意名称` 创建或打开一个剪贴板。
@@ -64,7 +104,7 @@
 
 1. 在浏览器地址栏输入 `https://你的域名.com/剪贴板名`。  
 2. 如果该名称不存在，会显示创建页面。  
-3. 填写内容（支持 Markdown、LaTeX），设置密码（可选），选择自动删除时长。  
+3. 填写内容（支持 Markdown、LaTeX），设置密码（可选），选择自动删除时长（含“永不删除”）。  
 4. 点击“创建剪贴板”，成功后自动跳转到剪贴板页面。
 
 ### 打开剪贴板
@@ -101,7 +141,7 @@ return 3; // 将 3 改为你需要的默认天数（需在 validDays 数组中�
 
 ### 增加更多过期选项
 
-编辑 `validDays` 数组和创建页面中的 `<select>` 内容。
+编辑 `validDays` 数组和创建页面中的 `<select>` 内容。注意：如果新增选项，需要在 D1 表中存储相应的 `expires_in_days` 值，并确保 `expires_at` 计算正确。
 
 ### 修改样式
 
@@ -117,8 +157,9 @@ return 3; // 将 3 改为你需要的默认天数（需在 validDays 数组中�
 
 - **依赖 CDN**：前端需要加载 Tailwind CSS、markdown-it、KaTeX 等库，请确保用户网络可以访问这些 CDN。  
 - **数据安全**：密码使用 SHA-256 哈希存储，但传输过程为明文（HTTPS 加密），建议配合 TLS。  
-- **免费配额**：Cloudflare Workers 和 KV 均有免费额度，滥用可能导致配额耗尽。建议根据需求设置合理的过期时间，或启用 `REQUIRE_PASSWORD` 提高创建门槛。  
-- **KV 限制**：KV 的 `expirationTtl` 最大支持 30 天（2592000 秒），因此自动删除时长上限为 30 天。  
+- **免费配额**：D1 免费计划提供 5 百万行读取/天，10 万行写入/天，通常足够个人使用。滥用可能导致配额耗尽，建议设置合理的过期时间，或启用 `REQUIRE_PASSWORD` 提高创建门槛。  
+- **定时清理**：请确保已配置 Cron Trigger，否则过期数据不会自动删除（只能靠读取时惰性删除）。  
+- **KV 迁移**：如果你之前使用 KV 存储数据，需要手动迁移到 D1（本版本不提供自动迁移脚本）。
 
 ---
 
@@ -138,5 +179,4 @@ MIT License
 - [highlight.js](https://highlightjs.org/)  
 - [markdown-it-texmath](https://github.com/goessner/markdown-it-texmath)
 
-
-欢迎对本项目提起Issue或PR，共同完善。
+欢迎对本项目提出Issue或Pull Reques。
