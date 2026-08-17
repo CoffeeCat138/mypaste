@@ -5,8 +5,9 @@ export default {
     const method = request.method;
 
     // 读取配置
-    const createVerificationEnabled = env.CREATE_PASSWORD === 'true'; // 是否启用创建验证
-    const allowedCreatePasswords = parseAllowedPasswords(env.ALLOWED_PASSWORDS); // 允许通过创建验证的密码列表
+    const createVerificationEnabled = env.CREATE_PASSWORD === 'true';
+    const allowedCreatePasswords = parseAllowedPasswords(env.ALLOWED_PASSWORDS);
+    const tokenFromUrl = url.searchParams.get('token') || '';
 
     // 处理 API 请求
     if (path.startsWith('/api/')) {
@@ -34,25 +35,47 @@ export default {
     if (!row) {
       // 剪贴板不存在
       if (createVerificationEnabled) {
+        if (tokenFromUrl) {
+          const tokenRow = await env.DB.prepare(
+            'SELECT expires_at FROM create_tokens WHERE token = ?'
+          ).bind(tokenFromUrl).first();
+          if (tokenRow && tokenRow.expires_at > Date.now()) {
+            // token 有效，返回创建页面
+            return new Response(getCreatePage(name, tokenFromUrl), {
+              headers: { 'Content-Type': 'text/html; charset=utf-8' }
+            });
+          }
+        }
+        // token 无效或不存在，返回验证页面
         return new Response(getVerifyPage(name), {
           headers: { 'Content-Type': 'text/html; charset=utf-8' }
         });
       } else {
-        return new Response(getCreatePage(name, false), {
+        return new Response(getCreatePage(name, ''), {
           headers: { 'Content-Type': 'text/html; charset=utf-8' }
         });
       }
     }
 
-    // 检查是否过期（惰性删除）
+    // 剪贴板存在但已过期
     if (row.expires_at !== null && row.expires_at <= Date.now()) {
       await env.DB.prepare('DELETE FROM clipboards WHERE name = ?').bind(name).run();
       if (createVerificationEnabled) {
+        if (tokenFromUrl) {
+          const tokenRow = await env.DB.prepare(
+            'SELECT expires_at FROM create_tokens WHERE token = ?'
+          ).bind(tokenFromUrl).first();
+          if (tokenRow && tokenRow.expires_at > Date.now()) {
+            return new Response(getCreatePage(name, tokenFromUrl), {
+              headers: { 'Content-Type': 'text/html; charset=utf-8' }
+            });
+          }
+        }
         return new Response(getVerifyPage(name), {
           headers: { 'Content-Type': 'text/html; charset=utf-8' }
         });
       } else {
-        return new Response(getCreatePage(name, false), {
+        return new Response(getCreatePage(name, ''), {
           headers: { 'Content-Type': 'text/html; charset=utf-8' }
         });
       }
@@ -71,7 +94,6 @@ export default {
     });
   },
 
-  // 定时清理过期剪贴板和令牌（每小时执行）
   async scheduled(event, env, ctx) {
     await cleanupExpiredData(env);
   }
@@ -122,16 +144,13 @@ async function verifyCreatePassword(body, env, createVerificationEnabled, allowe
   if (!password) {
     return jsonResponse({ error: '请输入密码' }, 400);
   }
-  // 检查密码是否在允许列表中
-  if (allowedCreatePasswords.length > 0 && !allowedCreatePasswords.includes(password)) {
-    return jsonResponse({ error: '密码错误' }, 403);
-  }
-  // 如果启用验证但允许列表为空，则拒绝（配置错误）
   if (allowedCreatePasswords.length === 0) {
     return jsonResponse({ error: '验证配置错误，请联系管理员' }, 500);
   }
+  if (!allowedCreatePasswords.includes(password)) {
+    return jsonResponse({ error: '密码错误' }, 403);
+  }
 
-  // 生成随机令牌，存入数据库，有效期10分钟
   const token = crypto.randomUUID();
   const now = Date.now();
   const expiresAt = now + 10 * 60 * 1000; // 10分钟
@@ -151,7 +170,6 @@ async function createClipboard(body, env, createVerificationEnabled) {
     return jsonResponse({ error: '内容不能为空' }, 400);
   }
 
-  // 如果启用了创建验证，则必须验证 token
   if (createVerificationEnabled) {
     if (!token) {
       return jsonResponse({ error: '缺少创建令牌' }, 401);
@@ -162,7 +180,6 @@ async function createClipboard(body, env, createVerificationEnabled) {
     if (!tokenRow || tokenRow.expires_at <= Date.now()) {
       return jsonResponse({ error: '创建令牌无效或已过期' }, 401);
     }
-    // 验证通过后删除令牌（一次性使用）
     await env.DB.prepare('DELETE FROM create_tokens WHERE token = ?').bind(token).run();
   }
 
@@ -282,13 +299,11 @@ async function deleteClipboard(body, env) {
 async function cleanupExpiredData(env) {
   const now = Date.now();
   try {
-    // 清理过期剪贴板
     const result = await env.DB.prepare(
       'DELETE FROM clipboards WHERE expires_at IS NOT NULL AND expires_at <= ?'
     ).bind(now).run();
     console.log(`Cleaned up ${result.changes} expired clipboards`);
 
-    // 清理过期创建令牌
     const tokenResult = await env.DB.prepare(
       'DELETE FROM create_tokens WHERE expires_at <= ?'
     ).bind(now).run();
@@ -318,7 +333,7 @@ function getValidExpiration(days) {
   if (typeof days === 'number' && validDays.includes(days)) {
     return days;
   }
-  return 3; // 默认 3 天
+  return 3;
 }
 
 function daysToMillis(days) {
@@ -353,7 +368,6 @@ function getHomePage() {
 </html>`;
 }
 
-// 验证密码页面
 function getVerifyPage(name) {
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -400,8 +414,7 @@ function getVerifyPage(name) {
 </html>`;
 }
 
-// 创建页面（无需 requirePassword 参数，密码字段仅为可选剪贴板访问密码）
-function getCreatePage(name, isVerified) {
+function getCreatePage(name, token) {
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -444,9 +457,7 @@ function getCreatePage(name, isVerified) {
   </div>
   <script>
     const name = ${JSON.stringify(name)};
-    // 从 URL 获取 token（如果有）
-    const urlParams = new URLSearchParams(window.location.search);
-    const createToken = urlParams.get('token') || '';
+    const createToken = ${JSON.stringify(token)};
 
     document.getElementById('createForm').addEventListener('submit', async (e) => {
       e.preventDefault();
@@ -477,7 +488,6 @@ function getCreatePage(name, isVerified) {
 </html>`;
 }
 
-// 打开剪贴板页面（与之前相同）
 function getOpenPage(meta) {
   const { name, hasPassword, createdAt, updatedAt, expiresInDays, enableMarkdown } = meta;
   const expiryText = expiresInDays === 0 ? '永不删除' : `${expiresInDays} 天后自动删除`;
