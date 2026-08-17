@@ -4,12 +4,13 @@ export default {
     const path = url.pathname;
     const method = request.method;
 
-    const requirePassword = env.REQUIRE_PASSWORD === 'true';
-    const allowedPasswords = parseAllowedPasswords(env.ALLOWED_PASSWORDS);
+    // 读取配置
+    const createVerificationEnabled = env.CREATE_PASSWORD === 'true'; // 是否启用创建验证
+    const allowedCreatePasswords = parseAllowedPasswords(env.ALLOWED_PASSWORDS); // 允许通过创建验证的密码列表
 
     // 处理 API 请求
     if (path.startsWith('/api/')) {
-      return handleApiRequest(request, env, ctx, requirePassword, allowedPasswords);
+      return handleApiRequest(request, env, ctx, createVerificationEnabled, allowedCreatePasswords);
     }
 
     // 首页
@@ -31,18 +32,30 @@ export default {
     ).bind(name).first();
 
     if (!row) {
-      // 不存在，显示创建页面
-      return new Response(getCreatePage(name, requirePassword, allowedPasswords), {
-        headers: { 'Content-Type': 'text/html; charset=utf-8' }
-      });
+      // 剪贴板不存在
+      if (createVerificationEnabled) {
+        return new Response(getVerifyPage(name), {
+          headers: { 'Content-Type': 'text/html; charset=utf-8' }
+        });
+      } else {
+        return new Response(getCreatePage(name, false), {
+          headers: { 'Content-Type': 'text/html; charset=utf-8' }
+        });
+      }
     }
 
     // 检查是否过期（惰性删除）
     if (row.expires_at !== null && row.expires_at <= Date.now()) {
       await env.DB.prepare('DELETE FROM clipboards WHERE name = ?').bind(name).run();
-      return new Response(getCreatePage(name, requirePassword, allowedPasswords), {
-        headers: { 'Content-Type': 'text/html; charset=utf-8' }
-      });
+      if (createVerificationEnabled) {
+        return new Response(getVerifyPage(name), {
+          headers: { 'Content-Type': 'text/html; charset=utf-8' }
+        });
+      } else {
+        return new Response(getCreatePage(name, false), {
+          headers: { 'Content-Type': 'text/html; charset=utf-8' }
+        });
+      }
     }
 
     const meta = {
@@ -58,14 +71,14 @@ export default {
     });
   },
 
-  // 定时清理过期剪贴板（每小时执行）
+  // 定时清理过期剪贴板和令牌（每小时执行）
   async scheduled(event, env, ctx) {
-    await cleanupExpiredClipboards(env);
+    await cleanupExpiredData(env);
   }
 };
 
 // ---------- API 处理 ----------
-async function handleApiRequest(request, env, ctx, requirePassword, allowedPasswords) {
+async function handleApiRequest(request, env, ctx, createVerificationEnabled, allowedCreatePasswords) {
   const url = new URL(request.url);
   const path = url.pathname;
   const method = request.method;
@@ -81,17 +94,56 @@ async function handleApiRequest(request, env, ctx, requirePassword, allowedPassw
     return jsonResponse({ error: 'Invalid JSON' }, 400);
   }
 
-  if (path === '/api/create') return createClipboard(body, env, requirePassword, allowedPasswords);
-  if (path === '/api/get') return getClipboardContent(body, env);
-  if (path === '/api/update') return updateClipboard(body, env);
-  if (path === '/api/delete') return deleteClipboard(body, env);
+  if (path === '/api/verify-create') {
+    return verifyCreatePassword(body, env, createVerificationEnabled, allowedCreatePasswords);
+  }
+  if (path === '/api/create') {
+    return createClipboard(body, env, createVerificationEnabled);
+  }
+  if (path === '/api/get') {
+    return getClipboardContent(body, env);
+  }
+  if (path === '/api/update') {
+    return updateClipboard(body, env);
+  }
+  if (path === '/api/delete') {
+    return deleteClipboard(body, env);
+  }
 
   return jsonResponse({ error: 'API endpoint not found' }, 404);
 }
 
 // ---------- 核心操作 ----------
-async function createClipboard(body, env, requirePassword, allowedPasswords) {
-  const { name, content, password, expiresInDays, enableMarkdown } = body;
+async function verifyCreatePassword(body, env, createVerificationEnabled, allowedCreatePasswords) {
+  const { password } = body;
+  if (!createVerificationEnabled) {
+    return jsonResponse({ error: '未启用创建验证' }, 400);
+  }
+  if (!password) {
+    return jsonResponse({ error: '请输入密码' }, 400);
+  }
+  // 检查密码是否在允许列表中
+  if (allowedCreatePasswords.length > 0 && !allowedCreatePasswords.includes(password)) {
+    return jsonResponse({ error: '密码错误' }, 403);
+  }
+  // 如果启用验证但允许列表为空，则拒绝（配置错误）
+  if (allowedCreatePasswords.length === 0) {
+    return jsonResponse({ error: '验证配置错误，请联系管理员' }, 500);
+  }
+
+  // 生成随机令牌，存入数据库，有效期10分钟
+  const token = crypto.randomUUID();
+  const now = Date.now();
+  const expiresAt = now + 10 * 60 * 1000; // 10分钟
+  await env.DB.prepare(
+    'INSERT INTO create_tokens (token, created_at, expires_at) VALUES (?, ?, ?)'
+  ).bind(token, now, expiresAt).run();
+
+  return jsonResponse({ success: true, token });
+}
+
+async function createClipboard(body, env, createVerificationEnabled) {
+  const { name, content, password, expiresInDays, enableMarkdown, token } = body;
   if (!name || typeof name !== 'string' || name.trim() === '') {
     return jsonResponse({ error: '剪贴板名称不能为空' }, 400);
   }
@@ -99,14 +151,22 @@ async function createClipboard(body, env, requirePassword, allowedPasswords) {
     return jsonResponse({ error: '内容不能为空' }, 400);
   }
 
-  const hasPassword = password && password.trim() !== '';
-  if (requirePassword && !hasPassword) {
-    return jsonResponse({ error: '此服务要求剪贴板必须设置密码' }, 400);
-  }
-  if (hasPassword && allowedPasswords.length > 0 && !allowedPasswords.includes(password)) {
-    return jsonResponse({ error: '密码不在允许的列表中' }, 400);
+  // 如果启用了创建验证，则必须验证 token
+  if (createVerificationEnabled) {
+    if (!token) {
+      return jsonResponse({ error: '缺少创建令牌' }, 401);
+    }
+    const tokenRow = await env.DB.prepare(
+      'SELECT expires_at FROM create_tokens WHERE token = ?'
+    ).bind(token).first();
+    if (!tokenRow || tokenRow.expires_at <= Date.now()) {
+      return jsonResponse({ error: '创建令牌无效或已过期' }, 401);
+    }
+    // 验证通过后删除令牌（一次性使用）
+    await env.DB.prepare('DELETE FROM create_tokens WHERE token = ?').bind(token).run();
   }
 
+  const hasPassword = password && password.trim() !== '';
   let passwordHash = null;
   if (hasPassword) {
     passwordHash = await sha256(password);
@@ -115,7 +175,6 @@ async function createClipboard(body, env, requirePassword, allowedPasswords) {
   const days = getValidExpiration(expiresInDays);
   const now = Date.now();
   const expiresAt = days > 0 ? now + daysToMillis(days) : null;
-  // enableMarkdown 默认为 true
   const markdownEnabled = enableMarkdown === false ? 0 : 1;
 
   try {
@@ -220,13 +279,20 @@ async function deleteClipboard(body, env) {
 }
 
 // ---------- 定时清理 ----------
-async function cleanupExpiredClipboards(env) {
+async function cleanupExpiredData(env) {
   const now = Date.now();
   try {
+    // 清理过期剪贴板
     const result = await env.DB.prepare(
       'DELETE FROM clipboards WHERE expires_at IS NOT NULL AND expires_at <= ?'
     ).bind(now).run();
     console.log(`Cleaned up ${result.changes} expired clipboards`);
+
+    // 清理过期创建令牌
+    const tokenResult = await env.DB.prepare(
+      'DELETE FROM create_tokens WHERE expires_at <= ?'
+    ).bind(now).run();
+    console.log(`Cleaned up ${tokenResult.changes} expired create tokens`);
   } catch (err) {
     console.error('Cleanup failed:', err);
   }
@@ -287,9 +353,55 @@ function getHomePage() {
 </html>`;
 }
 
-function getCreatePage(name, requirePassword, allowedPasswords) {
-  const requireAttr = requirePassword ? 'required' : '';
-  const allowedListJson = JSON.stringify(allowedPasswords);
+// 验证密码页面
+function getVerifyPage(name) {
+  return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>验证 - ${escapeHtml(name)}</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-50 min-h-screen flex items-center justify-center">
+  <div class="max-w-md mx-auto bg-white rounded-xl shadow p-8">
+    <h1 class="text-2xl font-bold mb-4">创建剪贴板需要验证</h1>
+    <p class="text-gray-600 mb-6">请输入全局创建密码以继续</p>
+    <input type="password" id="createPasswordInput" class="w-full border border-gray-300 rounded-lg px-3 py-2 mb-4" placeholder="密码">
+    <button id="verifyCreateBtn" class="w-full bg-blue-600 text-white py-2 rounded-lg hover:bg-blue-700">验证</button>
+    <p id="verifyError" class="text-red-500 mt-3"></p>
+  </div>
+  <script>
+    const name = ${JSON.stringify(name)};
+    document.getElementById('verifyCreateBtn').addEventListener('click', async () => {
+      const password = document.getElementById('createPasswordInput').value;
+      if (!password) {
+        document.getElementById('verifyError').textContent = '请输入密码';
+        return;
+      }
+      try {
+        const res = await fetch('/api/verify-create', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password })
+        });
+        const data = await res.json();
+        if (res.ok) {
+          window.location.href = '/' + encodeURIComponent(name) + '?token=' + encodeURIComponent(data.token);
+        } else {
+          document.getElementById('verifyError').textContent = data.error || '验证失败';
+        }
+      } catch (err) {
+        document.getElementById('verifyError').textContent = '网络错误';
+      }
+    });
+  </script>
+</body>
+</html>`;
+}
+
+// 创建页面（无需 requirePassword 参数，密码字段仅为可选剪贴板访问密码）
+function getCreatePage(name, isVerified) {
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -312,9 +424,8 @@ function getCreatePage(name, requirePassword, allowedPasswords) {
         <label for="enableMarkdown" class="ml-2 block text-sm text-gray-700">启用 Markdown 渲染（支持 LaTeX、代码高亮等）</label>
       </div>
       <div class="mb-4">
-        <label class="block text-sm font-medium text-gray-700 mb-1">密码${requirePassword ? '（必填）' : '（可选）'}</label>
-        <input type="text" id="password" ${requireAttr} class="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-transparent" placeholder="留空表示无密码">
-        <div class="hint text-sm text-gray-500 mt-1" id="passwordHint"></div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">访问密码（可选）</label>
+        <input type="text" id="password" class="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-transparent" placeholder="留空表示无密码">
       </div>
       <div class="mb-6">
         <label class="block text-sm font-medium text-gray-700 mb-1">自动删除时长</label>
@@ -333,14 +444,10 @@ function getCreatePage(name, requirePassword, allowedPasswords) {
   </div>
   <script>
     const name = ${JSON.stringify(name)};
-    const requirePassword = ${requirePassword};
-    const allowedPasswords = ${allowedListJson};
-    const passwordHint = document.getElementById('passwordHint');
-    if (allowedPasswords.length > 0) {
-      passwordHint.textContent = '允许的密码：' + allowedPasswords.join(', ');
-    } else if (requirePassword) {
-      passwordHint.textContent = '此服务要求必须设置密码';
-    }
+    // 从 URL 获取 token（如果有）
+    const urlParams = new URLSearchParams(window.location.search);
+    const createToken = urlParams.get('token') || '';
+
     document.getElementById('createForm').addEventListener('submit', async (e) => {
       e.preventDefault();
       const errorEl = document.getElementById('error');
@@ -353,7 +460,7 @@ function getCreatePage(name, requirePassword, allowedPasswords) {
         const res = await fetch('/api/create', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name, content, password, expiresInDays, enableMarkdown })
+          body: JSON.stringify({ name, content, password, expiresInDays, enableMarkdown, token: createToken })
         });
         const data = await res.json();
         if (res.ok) {
@@ -370,25 +477,20 @@ function getCreatePage(name, requirePassword, allowedPasswords) {
 </html>`;
 }
 
+// 打开剪贴板页面（与之前相同）
 function getOpenPage(meta) {
   const { name, hasPassword, createdAt, updatedAt, expiresInDays, enableMarkdown } = meta;
   const expiryText = expiresInDays === 0 ? '永不删除' : `${expiresInDays} 天后自动删除`;
-  
-  // 根据 enableMarkdown 决定是否加载 Markdown 相关资源
+
   const markdownResources = enableMarkdown ? `
-  <!-- markdown-it -->
   <script src="https://cdn.jsdelivr.net/npm/markdown-it@13/dist/markdown-it.min.js"></script>
-  <!-- KaTeX -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
   <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
-  <!-- markdown-it-texmath -->
   <script src="https://cdn.jsdelivr.net/npm/markdown-it-texmath@1.0.0/texmath.min.js"></script>
-  <!-- highlight.js 完整包（所有语言） -->
   <link rel="stylesheet" href="https://unpkg.com/@highlightjs/cdn-assets@11.9.0/styles/github.min.css">
   <script src="https://unpkg.com/@highlightjs/cdn-assets@11.9.0/highlight.min.js"></script>
   ` : '';
-  
-  // 根据 enableMarkdown 决定样式
+
   const markdownStyles = enableMarkdown ? `
     .markdown-body { line-height: 1.6; }
     .markdown-body pre { background: #f6f8fa; padding: 1em; border-radius: 6px; overflow-x: auto; }
@@ -401,7 +503,6 @@ function getOpenPage(meta) {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>剪贴板 - ${escapeHtml(name)}</title>
-  <!-- Tailwind CSS -->
   <script src="https://cdn.tailwindcss.com"></script>
   ${markdownResources}
   <style>
@@ -470,9 +571,8 @@ function getOpenPage(meta) {
     const enableMarkdown = ${enableMarkdown};
     let currentPassword = '';
     let originalMarkdown = '';
-    let renderAvailable = enableMarkdown; // 是否可以使用渲染功能
+    let renderAvailable = enableMarkdown;
 
-    // 初始化 markdown-it（仅当启用 Markdown 时）
     let md = null;
     if (enableMarkdown) {
       try {
@@ -482,9 +582,7 @@ function getOpenPage(meta) {
             linkify: true,
             highlight: function (str, lang) {
               if (typeof hljs !== 'undefined' && lang && hljs.getLanguage(lang)) {
-                try {
-                  return hljs.highlight(str, { language: lang, ignoreIllegals: true }).value;
-                } catch (__) {}
+                try { return hljs.highlight(str, { language: lang, ignoreIllegals: true }).value; } catch (__) {}
               }
               return '';
             }
@@ -504,25 +602,17 @@ function getOpenPage(meta) {
       }
     }
 
-    // 渲染函数：失败返回 null
     function renderMarkdown(text) {
       if (!enableMarkdown || !renderAvailable || !md) return null;
-      try {
-        return md.render(text);
-      } catch (e) {
-        renderAvailable = false;
-        return null;
-      }
+      try { return md.render(text); } catch (e) { renderAvailable = false; return null; }
     }
 
-    // 显示警告信息
     function showWarning(message) {
       const banner = document.getElementById('warningBanner');
       banner.textContent = message;
       banner.classList.remove('hidden');
     }
 
-    // 在容器中显示内容，根据 enableMarkdown 决定渲染或纯文本
     function setContent(container, text) {
       if (enableMarkdown) {
         const rendered = renderMarkdown(text);
@@ -530,14 +620,10 @@ function getOpenPage(meta) {
           container.innerHTML = rendered;
         } else {
           container.textContent = text;
-          if (!renderAvailable) {
-            showWarning('⚠️ Markdown 渲染库加载失败，已显示原始文本。');
-          } else {
-            showWarning('⚠️ 渲染时出现错误，已显示原始文本。');
-          }
+          if (!renderAvailable) showWarning('⚠️ Markdown 渲染库加载失败，已显示原始文本。');
+          else showWarning('⚠️ 渲染时出现错误，已显示原始文本。');
         }
       } else {
-        // 纯文本模式
         container.textContent = text;
       }
     }
@@ -584,10 +670,7 @@ function getOpenPage(meta) {
             alert(data.error || '加载失败');
           }
         }
-      } catch (err) {
-        console.error('加载内容失败:', err);
-        alert('网络错误，请检查连接');
-      }
+      } catch (err) { alert('网络错误，请检查连接'); }
     }
 
     async function copyContent() {
@@ -640,10 +723,7 @@ function getOpenPage(meta) {
             document.getElementById('contentSection').classList.add('hidden');
           }
         }
-      } catch (err) {
-        console.error(err);
-        document.getElementById('editError').textContent = '网络错误，请检查连接';
-      }
+      } catch (err) { document.getElementById('editError').textContent = '网络错误，请检查连接'; }
     });
 
     document.getElementById('deleteBtn').addEventListener('click', async () => {
@@ -664,10 +744,7 @@ function getOpenPage(meta) {
             document.getElementById('contentSection').classList.add('hidden');
           }
         }
-      } catch (err) {
-        console.error(err);
-        alert('网络错误，请检查连接');
-      }
+      } catch (err) { alert('网络错误，请检查连接'); }
     });
 
     if (!hasPassword) { loadContent(''); }
