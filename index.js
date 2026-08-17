@@ -27,7 +27,7 @@ export default {
 
     // 检查剪贴板是否存在
     const row = await env.DB.prepare(
-      'SELECT name, password_hash, created_at, updated_at, expires_in_days, expires_at FROM clipboards WHERE name = ?'
+      'SELECT name, password_hash, created_at, updated_at, expires_in_days, expires_at, enable_markdown FROM clipboards WHERE name = ?'
     ).bind(name).first();
 
     if (!row) {
@@ -50,7 +50,8 @@ export default {
       hasPassword: !!row.password_hash,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
-      expiresInDays: row.expires_in_days
+      expiresInDays: row.expires_in_days,
+      enableMarkdown: row.enable_markdown === 1
     };
     return new Response(getOpenPage(meta), {
       headers: { 'Content-Type': 'text/html; charset=utf-8' }
@@ -90,7 +91,7 @@ async function handleApiRequest(request, env, ctx, requirePassword, allowedPassw
 
 // ---------- 核心操作 ----------
 async function createClipboard(body, env, requirePassword, allowedPasswords) {
-  const { name, content, password, expiresInDays } = body;
+  const { name, content, password, expiresInDays, enableMarkdown } = body;
   if (!name || typeof name !== 'string' || name.trim() === '') {
     return jsonResponse({ error: '剪贴板名称不能为空' }, 400);
   }
@@ -114,11 +115,13 @@ async function createClipboard(body, env, requirePassword, allowedPasswords) {
   const days = getValidExpiration(expiresInDays);
   const now = Date.now();
   const expiresAt = days > 0 ? now + daysToMillis(days) : null;
+  // enableMarkdown 默认为 true
+  const markdownEnabled = enableMarkdown === false ? 0 : 1;
 
   try {
     await env.DB.prepare(
-      'INSERT INTO clipboards (name, content, password_hash, created_at, updated_at, expires_in_days, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
-    ).bind(name, content, passwordHash, now, now, days, expiresAt).run();
+      'INSERT INTO clipboards (name, content, password_hash, created_at, updated_at, expires_in_days, expires_at, enable_markdown) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+    ).bind(name, content, passwordHash, now, now, days, expiresAt, markdownEnabled).run();
   } catch (err) {
     if (err.message && err.message.includes('UNIQUE constraint failed')) {
       return jsonResponse({ error: '剪贴板已存在，请直接打开' }, 409);
@@ -126,7 +129,7 @@ async function createClipboard(body, env, requirePassword, allowedPasswords) {
     return jsonResponse({ error: '数据库错误' }, 500);
   }
 
-  return jsonResponse({ success: true, expiresInDays: days });
+  return jsonResponse({ success: true, expiresInDays: days, enableMarkdown: markdownEnabled === 1 });
 }
 
 async function getClipboardContent(body, env) {
@@ -134,7 +137,7 @@ async function getClipboardContent(body, env) {
   if (!name) return jsonResponse({ error: '缺少剪贴板名称' }, 400);
 
   const row = await env.DB.prepare(
-    'SELECT content, password_hash, created_at, updated_at, expires_in_days, expires_at FROM clipboards WHERE name = ?'
+    'SELECT content, password_hash, created_at, updated_at, expires_in_days, expires_at, enable_markdown FROM clipboards WHERE name = ?'
   ).bind(name).first();
 
   if (!row) {
@@ -157,7 +160,8 @@ async function getClipboardContent(body, env) {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     expiresInDays: row.expires_in_days,
-    hasPassword: !!row.password_hash
+    hasPassword: !!row.password_hash,
+    enableMarkdown: row.enable_markdown === 1
   });
 }
 
@@ -300,8 +304,12 @@ function getCreatePage(name, requirePassword, allowedPasswords) {
     <p class="text-gray-600 mb-6">名称：<strong>${escapeHtml(name)}</strong></p>
     <form id="createForm">
       <div class="mb-4">
-        <label class="block text-sm font-medium text-gray-700 mb-1">内容（支持 Markdown + LaTeX）</label>
+        <label class="block text-sm font-medium text-gray-700 mb-1">内容</label>
         <textarea id="content" required class="w-full h-48 border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-transparent" placeholder="粘贴或输入文本..."></textarea>
+      </div>
+      <div class="mb-4 flex items-center">
+        <input type="checkbox" id="enableMarkdown" checked class="h-4 w-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500">
+        <label for="enableMarkdown" class="ml-2 block text-sm text-gray-700">启用 Markdown 渲染（支持 LaTeX、代码高亮等）</label>
       </div>
       <div class="mb-4">
         <label class="block text-sm font-medium text-gray-700 mb-1">密码${requirePassword ? '（必填）' : '（可选）'}</label>
@@ -340,11 +348,12 @@ function getCreatePage(name, requirePassword, allowedPasswords) {
       const content = document.getElementById('content').value;
       const password = document.getElementById('password').value;
       const expiresInDays = parseInt(document.getElementById('expiresInDays').value);
+      const enableMarkdown = document.getElementById('enableMarkdown').checked;
       try {
         const res = await fetch('/api/create', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name, content, password, expiresInDays })
+          body: JSON.stringify({ name, content, password, expiresInDays, enableMarkdown })
         });
         const data = await res.json();
         if (res.ok) {
@@ -362,16 +371,11 @@ function getCreatePage(name, requirePassword, allowedPasswords) {
 }
 
 function getOpenPage(meta) {
-  const { name, hasPassword, createdAt, updatedAt, expiresInDays } = meta;
+  const { name, hasPassword, createdAt, updatedAt, expiresInDays, enableMarkdown } = meta;
   const expiryText = expiresInDays === 0 ? '永不删除' : `${expiresInDays} 天后自动删除`;
-  return `<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>剪贴板 - ${escapeHtml(name)}</title>
-  <!-- Tailwind CSS -->
-  <script src="https://cdn.tailwindcss.com"></script>
+  
+  // 根据 enableMarkdown 决定是否加载 Markdown 相关资源
+  const markdownResources = enableMarkdown ? `
   <!-- markdown-it -->
   <script src="https://cdn.jsdelivr.net/npm/markdown-it@13/dist/markdown-it.min.js"></script>
   <!-- KaTeX -->
@@ -382,10 +386,26 @@ function getOpenPage(meta) {
   <!-- highlight.js 完整包（所有语言） -->
   <link rel="stylesheet" href="https://unpkg.com/@highlightjs/cdn-assets@11.9.0/styles/github.min.css">
   <script src="https://unpkg.com/@highlightjs/cdn-assets@11.9.0/highlight.min.js"></script>
-  <style>
+  ` : '';
+  
+  // 根据 enableMarkdown 决定样式
+  const markdownStyles = enableMarkdown ? `
     .markdown-body { line-height: 1.6; }
     .markdown-body pre { background: #f6f8fa; padding: 1em; border-radius: 6px; overflow-x: auto; }
     .katex { font-size: 1.1em; }
+  ` : '';
+
+  return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>剪贴板 - ${escapeHtml(name)}</title>
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  ${markdownResources}
+  <style>
+    ${markdownStyles}
     body, html { height: 100%; }
     .app-container { min-height: 100vh; display: flex; flex-direction: column; }
     .content-area { flex: 1; overflow-y: auto; }
@@ -421,7 +441,7 @@ function getOpenPage(meta) {
       <div class="content-area p-6">
         <div id="warningBanner" class="warning-banner hidden"></div>
         <div id="previewMode">
-          <div id="contentDisplay" class="markdown-body bg-white rounded-xl shadow p-6 max-w-4xl mx-auto"></div>
+          <div id="contentDisplay" class="bg-white rounded-xl shadow p-6 max-w-4xl mx-auto ${enableMarkdown ? 'markdown-body' : 'whitespace-pre-wrap'}"></div>
         </div>
         <div id="editMode" class="hidden">
           <div class="edit-container flex gap-4 max-w-6xl mx-auto">
@@ -431,7 +451,7 @@ function getOpenPage(meta) {
             </div>
             <div class="flex-1">
               <label class="block text-sm font-medium mb-1">实时预览</label>
-              <div id="editPreview" class="markdown-body bg-white rounded-xl shadow p-4 h-[70vh] overflow-y-auto"></div>
+              <div id="editPreview" class="bg-white rounded-xl shadow p-4 h-[70vh] overflow-y-auto ${enableMarkdown ? 'markdown-body' : 'whitespace-pre-wrap'}"></div>
             </div>
           </div>
           <div class="mt-4 flex space-x-2 max-w-6xl mx-auto">
@@ -447,43 +467,46 @@ function getOpenPage(meta) {
   <script>
     const name = ${JSON.stringify(name)};
     const hasPassword = ${hasPassword};
+    const enableMarkdown = ${enableMarkdown};
     let currentPassword = '';
     let originalMarkdown = '';
-    let renderAvailable = true; // 标记渲染功能是否可用
+    let renderAvailable = enableMarkdown; // 是否可以使用渲染功能
 
-    // 初始化 markdown-it（可能失败）
+    // 初始化 markdown-it（仅当启用 Markdown 时）
     let md = null;
-    try {
-      if (typeof window.markdownit !== 'undefined') {
-        md = window.markdownit({
-          html: false,
-          linkify: true,
-          highlight: function (str, lang) {
-            if (typeof hljs !== 'undefined' && lang && hljs.getLanguage(lang)) {
-              try {
-                return hljs.highlight(str, { language: lang, ignoreIllegals: true }).value;
-              } catch (__) {}
+    if (enableMarkdown) {
+      try {
+        if (typeof window.markdownit !== 'undefined') {
+          md = window.markdownit({
+            html: false,
+            linkify: true,
+            highlight: function (str, lang) {
+              if (typeof hljs !== 'undefined' && lang && hljs.getLanguage(lang)) {
+                try {
+                  return hljs.highlight(str, { language: lang, ignoreIllegals: true }).value;
+                } catch (__) {}
+              }
+              return '';
             }
-            return '';
-          }
-        });
-        if (typeof window.texmath !== 'undefined' && typeof window.katex !== 'undefined') {
-          md.use(window.texmath, {
-            engine: window.katex,
-            delimiters: ['dollars', 'brackets'],
-            katexOptions: { throwOnError: false }
           });
+          if (typeof window.texmath !== 'undefined' && typeof window.katex !== 'undefined') {
+            md.use(window.texmath, {
+              engine: window.katex,
+              delimiters: ['dollars', 'brackets'],
+              katexOptions: { throwOnError: false }
+            });
+          }
+        } else {
+          renderAvailable = false;
         }
-      } else {
+      } catch (e) {
         renderAvailable = false;
       }
-    } catch (e) {
-      renderAvailable = false;
     }
 
     // 渲染函数：失败返回 null
     function renderMarkdown(text) {
-      if (!renderAvailable || !md) return null;
+      if (!enableMarkdown || !renderAvailable || !md) return null;
       try {
         return md.render(text);
       } catch (e) {
@@ -499,18 +522,23 @@ function getOpenPage(meta) {
       banner.classList.remove('hidden');
     }
 
-    // 在容器中显示内容，处理渲染或纯文本
-    function setContent(container, markdown) {
-      const rendered = renderMarkdown(markdown);
-      if (rendered !== null) {
-        container.innerHTML = rendered;
-      } else {
-        container.textContent = markdown;
-        if (!renderAvailable) {
-          showWarning('⚠️ Markdown 渲染库加载失败，已显示原始文本。');
+    // 在容器中显示内容，根据 enableMarkdown 决定渲染或纯文本
+    function setContent(container, text) {
+      if (enableMarkdown) {
+        const rendered = renderMarkdown(text);
+        if (rendered !== null) {
+          container.innerHTML = rendered;
         } else {
-          showWarning('⚠️ 渲染时出现错误，已显示原始文本。');
+          container.textContent = text;
+          if (!renderAvailable) {
+            showWarning('⚠️ Markdown 渲染库加载失败，已显示原始文本。');
+          } else {
+            showWarning('⚠️ 渲染时出现错误，已显示原始文本。');
+          }
         }
+      } else {
+        // 纯文本模式
+        container.textContent = text;
       }
     }
 

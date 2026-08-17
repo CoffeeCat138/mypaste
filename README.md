@@ -1,22 +1,23 @@
-# 云剪贴板（D1 版）
+# 云剪贴板（D1 版，支持可选 Markdown）
 
-一个基于 **Cloudflare Workers + D1** 的现代在线剪贴板，支持 Markdown、LaTeX 数学公式、代码高亮、密码保护、自动过期、实时编辑预览和一键复制。数据存储在 D1 数据库中，具备并发安全（主键唯一约束）和定时清理过期数据的能力。
+一个基于 **Cloudflare Workers + D1** 的现代在线剪贴板，支持 Markdown、LaTeX 数学公式、代码高亮、密码保护、自动过期（含永不删除）、实时编辑预览、一键复制。创建剪贴板时可选择是否启用 Markdown 渲染，禁用时以纯文本显示，速度更快且不依赖前端渲染库。数据存储在 D1 数据库中，具备并发安全（主键唯一约束）和定时清理过期数据的能力。
 
 ---
 
 ## ✨ 功能特性
 
 - 🖥️ **全屏布局**：剪贴板页面充满视口，顶部工具栏固定，内容区域自适应滚动。
-- 🎨 **现代 UI**：基于 Tailwind CSS，简洁美观，响应式设计。
-- 📝 **Markdown 渲染**：使用 `markdown-it`，安全（默认不支持原始 HTML），支持 GFM。
-- 🔢 **LaTeX 数学公式**：通过 `markdown-it-texmath` + `KaTeX` 渲染 `$...$` 和 `$$...$$`。
-- 🌈 **代码高亮**：集成 `highlight.js`，支持多种编程语言。
+- 🎨 **现代 UI**：基于 Tailwind CSS，简洁美观，响应式设计，移动端友好。
+- 📝 **可选 Markdown 渲染**：创建时可勾选“启用 Markdown”，支持 GFM 语法；若未勾选，则纯文本显示，不加载额外渲染库，加载更快。
+- 🔢 **LaTeX 数学公式**：启用 Markdown 后，通过 `markdown-it-texmath` + `KaTeX` 渲染 `$...$` 和 `$$...$$`。
+- 🌈 **代码高亮**：启用 Markdown 后，集成 `highlight.js`，支持多种编程语言。
 - 🔒 **密码保护**：可选密码，使用 SHA-256 哈希存储，可配置强制密码和白名单。
 - ⏱️ **自动过期**：可设置 0（永不删除）、1、3、7、14、30 天，默认 3 天；通过 Cron 触发器每小时清理过期数据。
-- ✍️ **实时编辑预览**：左右分屏，边输入边渲染。
-- 📋 **一键复制**：复制原始 Markdown 内容。
+- ✍️ **实时编辑预览**：左右分屏，边输入边渲染（若启用 Markdown），或纯文本同步显示。
+- 📋 **一键复制**：复制原始内容（无论渲染与否）。
 - 🔄 **同源部署**：前端与 API 集成在同一个 Worker 中，无跨域问题，API 地址不暴露。
 - 🛡️ **并发安全**：使用 D1 主键唯一约束，防止两个人同时创建同名剪贴板时互相覆盖。
+- ⚠️ **渲染失败回退**：若 Markdown 库加载失败或渲染出错，自动回退为纯文本并提示原因，不显示“网络错误”。
 
 ---
 
@@ -46,7 +47,8 @@ CREATE TABLE clipboards (
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   expires_in_days INTEGER NOT NULL DEFAULT 0,
-  expires_at INTEGER
+  expires_at INTEGER,
+  enable_markdown INTEGER NOT NULL DEFAULT 1
 );
 ```
 
@@ -55,13 +57,17 @@ CREATE TABLE clipboards (
 CREATE INDEX idx_expires_at ON clipboards(expires_at);
 ```
 
-> **注意**：D1 控制台可能不支持一次执行多条语句或带注释的 SQL，请务必分开执行上述两条语句。
+> **注意**：D1 控制台可能不支持一次执行多条语句或带注释的 SQL，请务必分开执行上述两条语句。  
+> 如果已有旧版表（无 `enable_markdown` 字段），请先执行：
+> ```sql
+> ALTER TABLE clipboards ADD COLUMN enable_markdown INTEGER NOT NULL DEFAULT 1;
+> ```
 
 ### 2. 创建 Worker 并粘贴代码
 
 1. 进入 **Workers & Pages** → **Create application** → **Create Worker**。
 2. 给你的 Worker 命名，例如 `cloud-clipboard`。
-3. 将本项目中的 Worker 代码（见下文）完整粘贴到编辑器中。
+3. 将本项目中的 Worker 代码（完整代码见代码文件）粘贴到编辑器中。
 4. 点击 **Settings** → **Variables**。
 5. 在 **D1 database bindings** 下，添加绑定：
    - **Variable name**: `DB`
@@ -75,8 +81,6 @@ CREATE INDEX idx_expires_at ON clipboards(expires_at);
 2. 点击 **Add Cron Trigger**。
 3. 输入 Cron 表达式 `0 * * * *`（每小时整点执行一次）。
 4. 保存。
-
-（由于Cloudflare的页面一直在更新所以可能位置有变化）
 
 ### 4. 访问使用
 
@@ -104,23 +108,25 @@ CREATE INDEX idx_expires_at ON clipboards(expires_at);
 
 1. 在浏览器地址栏输入 `https://你的域名.com/剪贴板名`。  
 2. 如果该名称不存在，会显示创建页面。  
-3. 填写内容（支持 Markdown、LaTeX），设置密码（可选），选择自动删除时长（含“永不删除”）。  
-4. 点击“创建剪贴板”，成功后自动跳转到剪贴板页面。
+3. 填写内容（支持 Markdown、LaTeX），选择是否启用 Markdown 渲染（默认启用）。  
+4. 设置密码（可选），选择自动删除时长（含“永不删除”）。  
+5. 点击“创建剪贴板”，成功后自动跳转到剪贴板页面。
 
 ### 打开剪贴板
 
-- **无密码**：直接显示渲染后的内容。  
+- **无密码**：直接显示渲染后的内容（或纯文本）。  
 - **有密码**：先输入密码验证，通过后显示内容。  
 
 ### 编辑剪贴板
 
 - 在预览模式下点击顶部工具栏的“编辑”按钮。  
-- 进入编辑模式，左侧输入 Markdown/LaTeX，右侧实时预览。  
+- 进入编辑模式，左侧输入内容，右侧实时预览（若启用 Markdown）。  
 - 编辑完成后点击“保存”更新内容，或点击“取消”放弃修改。
 
 ### 复制内容
 
-- 在预览模式下点击“复制”按钮，将原始 Markdown 内容复制到剪贴板。  
+- 在预览模式下点击“复制”按钮，将原始内容复制到剪贴板。  
+- 复制功能不依赖渲染是否成功，始终复制原始文本。
 
 ### 删除剪贴板
 
@@ -155,11 +161,12 @@ return 3; // 将 3 改为你需要的默认天数（需在 validDays 数组中�
 
 ## ⚠️ 注意事项
 
-- **依赖 CDN**：前端需要加载 Tailwind CSS、markdown-it、KaTeX 等库，请确保用户网络可以访问这些 CDN。  
+- **依赖 CDN**：前端需要加载 Tailwind CSS、markdown-it、KaTeX 等库（仅当启用 Markdown 时）。请确保用户网络可以访问这些 CDN。  
 - **数据安全**：密码使用 SHA-256 哈希存储，但传输过程为明文（HTTPS 加密），建议配合 TLS。  
 - **免费配额**：D1 免费计划提供 5 百万行读取/天，10 万行写入/天，通常足够个人使用。滥用可能导致配额耗尽，建议设置合理的过期时间，或启用 `REQUIRE_PASSWORD` 提高创建门槛。  
 - **定时清理**：请确保已配置 Cron Trigger，否则过期数据不会自动删除（只能靠读取时惰性删除）。  
-- **KV 迁移**：如果你之前使用 KV 存储数据，需要手动迁移到 D1（本版本不提供自动迁移脚本）。
+- **KV 迁移**：如果你之前使用 KV 存储数据，需要手动迁移到 D1（本版本不提供自动迁移脚本）。  
+- **Markdown 可选**：创建后无法更改是否启用 Markdown，若有需要请在创建时决定。
 
 ---
 
@@ -179,4 +186,4 @@ MIT License
 - [highlight.js](https://highlightjs.org/)  
 - [markdown-it-texmath](https://github.com/goessner/markdown-it-texmath)
 
-欢迎对本项目提出Issue或Pull Reques。
+欢迎提出Issue或Pull Request，共同完善项目。
