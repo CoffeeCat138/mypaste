@@ -7,23 +7,39 @@ export default {
     const requirePassword = env.REQUIRE_PASSWORD === 'true';
     const allowedPasswords = parseAllowedPasswords(env.ALLOWED_PASSWORDS);
 
+    // 处理 API 请求
     if (path.startsWith('/api/')) {
       return handleApiRequest(request, env, ctx, requirePassword, allowedPasswords);
     }
 
+    // 首页
     if (path === '/') {
       return new Response(getHomePage(), {
         headers: { 'Content-Type': 'text/html; charset=utf-8' }
       });
     }
 
+    // 剪贴板页面
     const name = decodeURIComponent(path.slice(1));
     if (name.includes('/')) {
       return new Response('Not Found', { status: 404 });
     }
 
-    const data = await env.CLIPBOARD_KV.get(name, 'json');
-    if (!data) {
+    // 检查剪贴板是否存在
+    const row = await env.DB.prepare(
+      'SELECT name, password_hash, created_at, updated_at, expires_in_days, expires_at FROM clipboards WHERE name = ?'
+    ).bind(name).first();
+
+    if (!row) {
+      // 不存在，显示创建页面
+      return new Response(getCreatePage(name, requirePassword, allowedPasswords), {
+        headers: { 'Content-Type': 'text/html; charset=utf-8' }
+      });
+    }
+
+    // 检查是否过期（惰性删除）
+    if (row.expires_at !== null && row.expires_at <= Date.now()) {
+      await env.DB.prepare('DELETE FROM clipboards WHERE name = ?').bind(name).run();
       return new Response(getCreatePage(name, requirePassword, allowedPasswords), {
         headers: { 'Content-Type': 'text/html; charset=utf-8' }
       });
@@ -31,17 +47,23 @@ export default {
 
     const meta = {
       name,
-      hasPassword: !!data.passwordHash,
-      createdAt: data.createdAt,
-      updatedAt: data.updatedAt,
-      expiresInDays: data.expiresInDays
+      hasPassword: !!row.password_hash,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      expiresInDays: row.expires_in_days
     };
     return new Response(getOpenPage(meta), {
       headers: { 'Content-Type': 'text/html; charset=utf-8' }
     });
+  },
+
+  // 定时清理过期剪贴板（每小时执行）
+  async scheduled(event, env, ctx) {
+    await cleanupExpiredClipboards(env);
   }
 };
 
+// ---------- API 处理 ----------
 async function handleApiRequest(request, env, ctx, requirePassword, allowedPasswords) {
   const url = new URL(request.url);
   const path = url.pathname;
@@ -66,6 +88,7 @@ async function handleApiRequest(request, env, ctx, requirePassword, allowedPassw
   return jsonResponse({ error: 'API endpoint not found' }, 404);
 }
 
+// ---------- 核心操作 ----------
 async function createClipboard(body, env, requirePassword, allowedPasswords) {
   const { name, content, password, expiresInDays } = body;
   if (!name || typeof name !== 'string' || name.trim() === '') {
@@ -74,9 +97,6 @@ async function createClipboard(body, env, requirePassword, allowedPasswords) {
   if (typeof content !== 'string') {
     return jsonResponse({ error: '内容不能为空' }, 400);
   }
-
-  const existing = await env.CLIPBOARD_KV.get(name, 'json');
-  if (existing) return jsonResponse({ error: '剪贴板已存在，请直接打开' }, 409);
 
   const hasPassword = password && password.trim() !== '';
   if (requirePassword && !hasPassword) {
@@ -87,20 +107,24 @@ async function createClipboard(body, env, requirePassword, allowedPasswords) {
   }
 
   let passwordHash = null;
-  if (hasPassword) passwordHash = await sha256(password);
+  if (hasPassword) {
+    passwordHash = await sha256(password);
+  }
 
   const days = getValidExpiration(expiresInDays);
   const now = Date.now();
-  const data = {
-    content,
-    passwordHash,
-    createdAt: now,
-    updatedAt: now,
-    expiresInDays: days
-  };
+  const expiresAt = days > 0 ? now + daysToMillis(days) : null;
 
-  const options = days > 0 ? { expirationTtl: daysToSeconds(days) } : {};
-  await env.CLIPBOARD_KV.put(name, JSON.stringify(data), options);
+  try {
+    await env.DB.prepare(
+      'INSERT INTO clipboards (name, content, password_hash, created_at, updated_at, expires_in_days, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
+    ).bind(name, content, passwordHash, now, now, days, expiresAt).run();
+  } catch (err) {
+    if (err.message && err.message.includes('UNIQUE constraint failed')) {
+      return jsonResponse({ error: '剪贴板已存在，请直接打开' }, 409);
+    }
+    return jsonResponse({ error: '数据库错误' }, 500);
+  }
 
   return jsonResponse({ success: true, expiresInDays: days });
 }
@@ -109,21 +133,31 @@ async function getClipboardContent(body, env) {
   const { name, password } = body;
   if (!name) return jsonResponse({ error: '缺少剪贴板名称' }, 400);
 
-  const data = await env.CLIPBOARD_KV.get(name, 'json');
-  if (!data) return jsonResponse({ error: '剪贴板不存在或已过期' }, 404);
+  const row = await env.DB.prepare(
+    'SELECT content, password_hash, created_at, updated_at, expires_in_days, expires_at FROM clipboards WHERE name = ?'
+  ).bind(name).first();
 
-  if (data.passwordHash) {
+  if (!row) {
+    return jsonResponse({ error: '剪贴板不存在或已过期' }, 404);
+  }
+
+  if (row.expires_at !== null && row.expires_at <= Date.now()) {
+    await env.DB.prepare('DELETE FROM clipboards WHERE name = ?').bind(name).run();
+    return jsonResponse({ error: '剪贴板不存在或已过期' }, 404);
+  }
+
+  if (row.password_hash) {
     if (!password) return jsonResponse({ error: '需要密码' }, 401);
     const hash = await sha256(password);
-    if (hash !== data.passwordHash) return jsonResponse({ error: '密码错误' }, 403);
+    if (hash !== row.password_hash) return jsonResponse({ error: '密码错误' }, 403);
   }
 
   return jsonResponse({
-    content: data.content,
-    createdAt: data.createdAt,
-    updatedAt: data.updatedAt,
-    expiresInDays: data.expiresInDays,
-    hasPassword: !!data.passwordHash
+    content: row.content,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    expiresInDays: row.expires_in_days,
+    hasPassword: !!row.password_hash
   });
 }
 
@@ -131,19 +165,27 @@ async function updateClipboard(body, env) {
   const { name, content, password } = body;
   if (!name || typeof content !== 'string') return jsonResponse({ error: '参数不完整' }, 400);
 
-  const data = await env.CLIPBOARD_KV.get(name, 'json');
-  if (!data) return jsonResponse({ error: '剪贴板不存在' }, 404);
+  const row = await env.DB.prepare(
+    'SELECT password_hash, expires_in_days, expires_at FROM clipboards WHERE name = ?'
+  ).bind(name).first();
 
-  if (data.passwordHash) {
-    if (!password) return jsonResponse({ error: '需要密码' }, 401);
-    const hash = await sha256(password);
-    if (hash !== data.passwordHash) return jsonResponse({ error: '密码错误' }, 403);
+  if (!row) return jsonResponse({ error: '剪贴板不存在' }, 404);
+
+  if (row.expires_at !== null && row.expires_at <= Date.now()) {
+    await env.DB.prepare('DELETE FROM clipboards WHERE name = ?').bind(name).run();
+    return jsonResponse({ error: '剪贴板不存在' }, 404);
   }
 
-  data.content = content;
-  data.updatedAt = Date.now();
-  const options = data.expiresInDays > 0 ? { expirationTtl: daysToSeconds(data.expiresInDays) } : {};
-  await env.CLIPBOARD_KV.put(name, JSON.stringify(data), options);
+  if (row.password_hash) {
+    if (!password) return jsonResponse({ error: '需要密码' }, 401);
+    const hash = await sha256(password);
+    if (hash !== row.password_hash) return jsonResponse({ error: '密码错误' }, 403);
+  }
+
+  const now = Date.now();
+  await env.DB.prepare(
+    'UPDATE clipboards SET content = ?, updated_at = ? WHERE name = ?'
+  ).bind(content, now, name).run();
 
   return jsonResponse({ success: true });
 }
@@ -152,19 +194,41 @@ async function deleteClipboard(body, env) {
   const { name, password } = body;
   if (!name) return jsonResponse({ error: '缺少剪贴板名称' }, 400);
 
-  const data = await env.CLIPBOARD_KV.get(name, 'json');
-  if (!data) return jsonResponse({ error: '剪贴板不存在' }, 404);
+  const row = await env.DB.prepare(
+    'SELECT password_hash, expires_at FROM clipboards WHERE name = ?'
+  ).bind(name).first();
 
-  if (data.passwordHash) {
-    if (!password) return jsonResponse({ error: '需要密码' }, 401);
-    const hash = await sha256(password);
-    if (hash !== data.passwordHash) return jsonResponse({ error: '密码错误' }, 403);
+  if (!row) return jsonResponse({ error: '剪贴板不存在' }, 404);
+
+  if (row.expires_at !== null && row.expires_at <= Date.now()) {
+    await env.DB.prepare('DELETE FROM clipboards WHERE name = ?').bind(name).run();
+    return jsonResponse({ error: '剪贴板不存在' }, 404);
   }
 
-  await env.CLIPBOARD_KV.delete(name);
+  if (row.password_hash) {
+    if (!password) return jsonResponse({ error: '需要密码' }, 401);
+    const hash = await sha256(password);
+    if (hash !== row.password_hash) return jsonResponse({ error: '密码错误' }, 403);
+  }
+
+  await env.DB.prepare('DELETE FROM clipboards WHERE name = ?').bind(name).run();
   return jsonResponse({ success: true });
 }
 
+// ---------- 定时清理 ----------
+async function cleanupExpiredClipboards(env) {
+  const now = Date.now();
+  try {
+    const result = await env.DB.prepare(
+      'DELETE FROM clipboards WHERE expires_at IS NOT NULL AND expires_at <= ?'
+    ).bind(now).run();
+    console.log(`Cleaned up ${result.changes} expired clipboards`);
+  } catch (err) {
+    console.error('Cleanup failed:', err);
+  }
+}
+
+// ---------- 辅助函数 ----------
 function jsonResponse(obj, status = 200) {
   return new Response(JSON.stringify(obj), {
     status,
@@ -180,7 +244,6 @@ async function sha256(text) {
 }
 
 function getValidExpiration(days) {
-  // 支持 0 表示永不删除
   const validDays = [0, 1, 3, 7, 14, 30];
   if (typeof days === 'number' && validDays.includes(days)) {
     return days;
@@ -188,8 +251,8 @@ function getValidExpiration(days) {
   return 3; // 默认 3 天
 }
 
-function daysToSeconds(days) {
-  return days * 24 * 60 * 60;
+function daysToMillis(days) {
+  return days * 24 * 60 * 60 * 1000;
 }
 
 function parseAllowedPasswords(str) {
@@ -290,7 +353,7 @@ function getCreatePage(name, requirePassword, allowedPasswords) {
           errorEl.textContent = data.error || '创建失败';
         }
       } catch (err) {
-        errorEl.textContent = '网络错误';
+        errorEl.textContent = '网络错误，请检查连接';
       }
     });
   </script>
@@ -307,14 +370,18 @@ function getOpenPage(meta) {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>剪贴板 - ${escapeHtml(name)}</title>
+  <!-- Tailwind CSS -->
   <script src="https://cdn.tailwindcss.com"></script>
+  <!-- markdown-it -->
   <script src="https://cdn.jsdelivr.net/npm/markdown-it@13/dist/markdown-it.min.js"></script>
+  <!-- KaTeX -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
   <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+  <!-- markdown-it-texmath -->
   <script src="https://cdn.jsdelivr.net/npm/markdown-it-texmath@1.0.0/texmath.min.js"></script>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github.min.css">
-  <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/common.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/markdown.min.js"></script>
+  <!-- highlight.js 完整包（所有语言） -->
+  <link rel="stylesheet" href="https://unpkg.com/@highlightjs/cdn-assets@11.9.0/styles/github.min.css">
+  <script src="https://unpkg.com/@highlightjs/cdn-assets@11.9.0/highlight.min.js"></script>
   <style>
     .markdown-body { line-height: 1.6; }
     .markdown-body pre { background: #f6f8fa; padding: 1em; border-radius: 6px; overflow-x: auto; }
@@ -322,6 +389,7 @@ function getOpenPage(meta) {
     body, html { height: 100%; }
     .app-container { min-height: 100vh; display: flex; flex-direction: column; }
     .content-area { flex: 1; overflow-y: auto; }
+    .warning-banner { background: #fef3c7; border: 1px solid #f59e0b; color: #92400e; padding: 10px; border-radius: 8px; margin-bottom: 15px; }
     @media (max-width: 768px) {
       .edit-container { flex-direction: column; }
     }
@@ -351,6 +419,7 @@ function getOpenPage(meta) {
         </div>
       </div>
       <div class="content-area p-6">
+        <div id="warningBanner" class="warning-banner hidden"></div>
         <div id="previewMode">
           <div id="contentDisplay" class="markdown-body bg-white rounded-xl shadow p-6 max-w-4xl mx-auto"></div>
         </div>
@@ -380,26 +449,73 @@ function getOpenPage(meta) {
     const hasPassword = ${hasPassword};
     let currentPassword = '';
     let originalMarkdown = '';
+    let renderAvailable = true; // 标记渲染功能是否可用
 
-    const md = window.markdownit({
-      html: false,
-      linkify: true,
-      highlight: function (str, lang) {
-        if (lang && hljs.getLanguage(lang)) {
-          try { return hljs.highlight(str, { language: lang }).value; } catch (__) {}
+    // 初始化 markdown-it（可能失败）
+    let md = null;
+    try {
+      if (typeof window.markdownit !== 'undefined') {
+        md = window.markdownit({
+          html: false,
+          linkify: true,
+          highlight: function (str, lang) {
+            if (typeof hljs !== 'undefined' && lang && hljs.getLanguage(lang)) {
+              try {
+                return hljs.highlight(str, { language: lang, ignoreIllegals: true }).value;
+              } catch (__) {}
+            }
+            return '';
+          }
+        });
+        if (typeof window.texmath !== 'undefined' && typeof window.katex !== 'undefined') {
+          md.use(window.texmath, {
+            engine: window.katex,
+            delimiters: ['dollars', 'brackets'],
+            katexOptions: { throwOnError: false }
+          });
         }
-        return '';
+      } else {
+        renderAvailable = false;
       }
-    }).use(window.texmath, {
-      engine: window.katex,
-      delimiters: ['dollars', 'brackets'],
-      katexOptions: { throwOnError: false }
-    });
+    } catch (e) {
+      renderAvailable = false;
+    }
 
-    function renderMarkdown(text) { return md.render(text); }
+    // 渲染函数：失败返回 null
+    function renderMarkdown(text) {
+      if (!renderAvailable || !md) return null;
+      try {
+        return md.render(text);
+      } catch (e) {
+        renderAvailable = false;
+        return null;
+      }
+    }
+
+    // 显示警告信息
+    function showWarning(message) {
+      const banner = document.getElementById('warningBanner');
+      banner.textContent = message;
+      banner.classList.remove('hidden');
+    }
+
+    // 在容器中显示内容，处理渲染或纯文本
+    function setContent(container, markdown) {
+      const rendered = renderMarkdown(markdown);
+      if (rendered !== null) {
+        container.innerHTML = rendered;
+      } else {
+        container.textContent = markdown;
+        if (!renderAvailable) {
+          showWarning('⚠️ Markdown 渲染库加载失败，已显示原始文本。');
+        } else {
+          showWarning('⚠️ 渲染时出现错误，已显示原始文本。');
+        }
+      }
+    }
 
     function showPreview() {
-      document.getElementById('contentDisplay').innerHTML = renderMarkdown(originalMarkdown);
+      setContent(document.getElementById('contentDisplay'), originalMarkdown);
       document.getElementById('previewMode').classList.remove('hidden');
       document.getElementById('editMode').classList.add('hidden');
     }
@@ -413,7 +529,7 @@ function getOpenPage(meta) {
 
     function updateEditPreview() {
       const text = document.getElementById('editContent').value;
-      document.getElementById('editPreview').innerHTML = renderMarkdown(text);
+      setContent(document.getElementById('editPreview'), text);
     }
 
     async function loadContent(password = '') {
@@ -440,7 +556,10 @@ function getOpenPage(meta) {
             alert(data.error || '加载失败');
           }
         }
-      } catch (err) { alert('网络错误'); }
+      } catch (err) {
+        console.error('加载内容失败:', err);
+        alert('网络错误，请检查连接');
+      }
     }
 
     async function copyContent() {
@@ -493,7 +612,10 @@ function getOpenPage(meta) {
             document.getElementById('contentSection').classList.add('hidden');
           }
         }
-      } catch (err) { document.getElementById('editError').textContent = '网络错误'; }
+      } catch (err) {
+        console.error(err);
+        document.getElementById('editError').textContent = '网络错误，请检查连接';
+      }
     });
 
     document.getElementById('deleteBtn').addEventListener('click', async () => {
@@ -514,7 +636,10 @@ function getOpenPage(meta) {
             document.getElementById('contentSection').classList.add('hidden');
           }
         }
-      } catch (err) { alert('网络错误'); }
+      } catch (err) {
+        console.error(err);
+        alert('网络错误，请检查连接');
+      }
     });
 
     if (!hasPassword) { loadContent(''); }
