@@ -1,6 +1,6 @@
 # 云剪贴板（Cloudflare Workers + D1）
 
-一个基于 **Cloudflare Workers + D1** 的现代在线剪贴板，支持 Markdown、LaTeX 数学公式、代码高亮、密码保护、自动过期（含永不删除）、实时编辑预览、一键复制。创建剪贴板时可选是否启用 Markdown 渲染；可配置全局创建验证，只有通过验证的用户才能新建剪贴板。数据存储于 D1 数据库，具备并发安全（主键唯一约束）和定时清理过期数据能力。
+一个基于 **Cloudflare Workers + D1** 的现代在线剪贴板，支持 Markdown、LaTeX 数学公式、代码高亮、密码保护（PBKDF2 加盐哈希）、自动过期（含永不删除）、实时编辑预览、一键复制。创建剪贴板时可选是否启用 Markdown 渲染；可配置全局创建验证，只有通过验证的用户才能新建剪贴板（验证令牌通过 HttpOnly Cookie 传递）。数据存储于 D1 数据库，具备并发安全（主键唯一约束）、CSRF 防护、暴力破解限速和定时清理过期数据能力。
 
 ---
 
@@ -11,8 +11,11 @@
 - 📝 **可选 Markdown 渲染**：创建时可勾选“启用 Markdown”，支持 GFM；若未勾选，纯文本显示，不加载渲染库，加载更快。
 - 🔢 **LaTeX 数学公式**：启用 Markdown 后，通过 `markdown-it-texmath` + `KaTeX` 渲染 `$...$` 和 `$$...$$`。
 - 🌈 **代码高亮**：启用 Markdown 后，集成 `highlight.js`，支持多种编程语言。
-- 🔒 **剪贴板密码**：每个剪贴板可设置访问密码（可选），密码使用 SHA-256 哈希存储。
-- 🛡️ **全局创建验证**：可配置 `CREATE_PASSWORD` 和 `ALLOWED_PASSWORDS`，要求用户输入正确密码后才能创建剪贴板。
+- 🔒 **剪贴板密码**：每个剪贴板可设置访问密码（可选），密码使用 PBKDF2 加随机盐哈希存储。
+- 🛡️ **全局创建验证**：可配置 `CREATE_PASSWORD` 和 `ALLOWED_PASSWORDS`，要求用户输入正确密码后才能创建剪贴板；令牌 10 分钟有效、绑定剪贴板名称、通过 HttpOnly Cookie 传递（不出现在 URL 中）。
+- 🚦 **暴力破解防护**：创建验证与剪贴板密码均按 IP 限速（10 次 / 10 分钟，超过返回 429）。
+- 🧱 **CSRF 防护**：API 校验请求来源（Origin），阻止跨站删除/篡改剪贴板。
+- 📏 **大小限制**：单条内容最多 100KB，剪贴板名称 1-64 字符且不含空格与斜杠。
 - ⏱️ **自动过期**：可设置 0（永不删除）、1、3、7、14、30 天，默认 3 天；通过 Cron 触发器每小时清理过期数据。
 - ✍️ **实时编辑预览**：左右分屏，边输入边渲染（若启用 Markdown），或纯文本同步显示。
 - 📋 **一键复制**：复制原始内容（无论渲染与否）。
@@ -58,22 +61,35 @@ CREATE INDEX idx_expires_at ON clipboards(expires_at);
 
 CREATE TABLE create_tokens (
   token TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
   created_at INTEGER NOT NULL,
   expires_at INTEGER NOT NULL
 );
 ```
 
+> 或者使用项目附带的迁移文件：在 `wrangler.toml` 中填入数据库 ID 后执行 `npx wrangler d1 migrations apply DB --remote`，会自动创建上述表结构。
+
 ### 2. 创建 Worker 并部署代码
+
+**方式 A：Dashboard 粘贴（与原来一致）**
 
 1. 进入 **Workers & Pages** → **Create application** → **Create Worker**。
 2. 给你的 Worker 命名，例如 `cloud-clipboard`。
-3. 将完整的 Worker 代码粘贴到编辑器中（代码见代码文件）。
+3. 将完整的 Worker 代码粘贴到编辑器中（代码见 `index.js`）。
 4. 点击 **Settings** → **Variables**。
 5. 在 **D1 database bindings** 下，添加绑定：
    - **Variable name**: `DB`
    - **D1 database**: 选择你在第 1 步创建的数据库。
 6. 在 **Environment Variables** 下，按需添加配置变量（见“环境变量配置”）。
 7. 点击 **Save and Deploy**。
+
+**方式 B：wrangler CLI（推荐）**
+
+1. 安装 wrangler 并登录：`npm install -g wrangler`、`wrangler login`。
+2. 编辑 `wrangler.toml`，将 `database_id` 替换为你的 D1 数据库 ID。
+3. 初始化数据库表：`npx wrangler d1 migrations apply DB --remote`。
+4. 部署：`npx wrangler deploy`。
+5. 如需启用创建验证，取消 `wrangler.toml` 中 `[vars]` 段对应注释后重新部署。
 
 ### 3. 配置定时清理（Cron Trigger）
 
@@ -95,6 +111,7 @@ CREATE TABLE create_tokens (
 |--------|------|------|------|
 | `CREATE_PASSWORD` | String | 设为 `"true"` 时启用全局创建验证；其他值（或未设置）表示禁用。 | `true` |
 | `ALLOWED_PASSWORDS` | String | JSON 数组字符串，列出能够通过创建验证的密码列表。启用验证时必填。 | `["114514","abc123"]` |
+| `PBKDF2_ITERATIONS` | Number | 可选。密码哈希的 PBKDF2 迭代次数，默认 10000（允许范围 1000-1000000）。越大越安全但越耗 CPU，注意 Workers 免费计划的 CPU 限制。 | `10000` |
 
 **注意**：
 - `CREATE_PASSWORD` 的值必须是字符串 `"true"`，在 Dashboard 中直接输入 `true` 即可，不要添加额外引号。
@@ -141,16 +158,15 @@ CREATE TABLE create_tokens (
 
 ### 修改默认过期天数
 
-后端 `getValidExpiration` 函数中：  
-```javascript
-return 3; // 将 3 改为你需要的默认天数（需在 validDays 数组中）
-```
+默认过期天数为 3 天，由两处共同决定：
+- 后端 `index.js` 顶部的 `VALID_EXPIRY_DAYS` 数组（合法天数）与 `DEFAULT_EXPIRY_DAYS`（缺省值）；
+- 前端创建页 `<select>` 中对应 `<option>` 的 `selected` 属性。
 
-同时修改创建页面 `<select>` 中对应 `<option>` 的 `selected` 属性。
+两者需同步修改。
 
 ### 增加更多过期选项
 
-编辑 `validDays` 数组和创建页面中的 `<select>` 内容。注意：新增选项后需确保 D1 表中的 `expires_in_days` 值可正确存储。
+编辑 `VALID_EXPIRY_DAYS` 数组和创建页面中的 `<select>` 内容。注意：新增选项后需确保 D1 表中的 `expires_in_days` 值可正确存储。API 显式传入不在列表中的天数会返回 400（不再静默回退默认值）。
 
 ### 修改样式
 
@@ -162,10 +178,24 @@ return 3; // 将 3 改为你需要的默认天数（需在 validDays 数组中�
 
 ---
 
+## 🧪 本地测试
+
+项目附带基于 Node 内置测试框架（`node:test`）的自动化测试，使用内存 Mock 模拟 D1，无需联网或部署即可运行：
+
+```bash
+node test/index.test.js   # 或 npm test
+```
+
+要求 Node 18+。测试覆盖：CRUD、密码校验、过期清理、创建验证令牌流程、CSRF 防护、限速、页面内联内容与 XSS 转义等（共 39 个用例）。
+
+---
+
 ## ⚠️ 注意事项
 
 - **依赖 CDN**：前端需要加载 Tailwind CSS、markdown-it、KaTeX 等库（仅当启用 Markdown 时）。请确保用户网络可以访问这些 CDN。  
-- **数据安全**：密码使用 SHA-256 哈希存储，但传输过程为明文（HTTPS 加密），建议配合 TLS。  
+- **数据安全**：剪贴板密码使用 PBKDF2（随机盐 + 默认 10000 次迭代）哈希存储，不同剪贴板即使密码相同哈希也不同；传输过程依赖 HTTPS 加密，请务必启用 TLS。若曾使用旧版本（无盐 SHA-256），旧哈希无法通过新校验逻辑验证，需重新设置密码。  
+- **限速说明**：暴力破解限速基于 Worker 内存计数（按 IP），多 isolate 间不共享且重启后重置，属于基础防护而非绝对保障。  
+- **创建令牌**：通过 HttpOnly + SameSite=Lax Cookie 传递，10 分钟有效，创建成功后立即作废，且与剪贴板名称绑定。  
 - **免费配额**：D1 免费计划提供 5 百万行读取/天，10 万行写入/天，通常足够个人使用。滥用可能导致配额耗尽，建议设置合理的过期时间，或启用 `CREATE_PASSWORD` 提高创建门槛。  
 - **定时清理**：请确保已配置 Cron Trigger，否则过期数据不会自动删除（只能靠读取时惰性删除）。  
 - **KV 迁移**：本版本使用 D1，不支持自动从 KV 迁移数据。  

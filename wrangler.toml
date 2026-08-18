@@ -1,0 +1,21 @@
+# 云剪贴板 Cloudflare Worker 配置
+# 部署前将 database_id 替换为你的 D1 数据库 ID
+name = "cloud-clipboard"
+main = "index.js"
+compatibility_date = "2025-01-01"
+
+[[d1_databases]]
+binding = "DB"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+migrations_dir = "migrations"
+
+[triggers]
+crons = ["0 * * * *"]
+
+[vars]
+# 可选：设为 "true" 时启用全局创建验证
+# CREATE_PASSWORD = "true"
+# 启用创建验证时必填：JSON 数组字符串
+# ALLOWED_PASSWORDS = "[\"114514\"]"
+# 可选：PBKDF2 迭代次数（默认 10000，范围 1000-1000000；越大越安全但越耗 CPU）
+# PBKDF2_ITERATIONS = "10000"

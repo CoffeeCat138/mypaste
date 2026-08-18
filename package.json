@@ -1,0 +1,12 @@
+{
+  "name": "cloud-clipboard",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "云剪贴板：Cloudflare Workers + D1 在线剪贴板",
+  "scripts": {
+    "test": "node test/index.test.js",
+    "deploy": "wrangler deploy",
+    "migrate": "wrangler d1 migrations apply DB --remote"
+  }
+}
