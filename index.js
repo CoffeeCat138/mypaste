@@ -771,7 +771,7 @@ function getOpenPage(meta) {
       <div class="bg-white border-b border-gray-200 px-4 py-3 flex items-center justify-between flex-wrap gap-2 shadow-sm">
         <div>
           <h1 class="text-xl font-bold">📋 ${escapeHtml(name)}</h1>
-          <p class="text-xs text-gray-500">创建于 ${new Date(createdAt).toLocaleString()} · ${expiryText}</p>
+          <p class="text-xs text-gray-500">创建于 <span id="createdAtDisplay">${new Date(createdAt).toLocaleString()}</span> · ${expiryText}</p>
         </div>
         <div class="flex space-x-2">
           <button id="copyBtn" class="bg-gray-200 hover:bg-gray-300 text-gray-800 px-4 py-2 rounded-lg text-sm">复制</button>
@@ -810,6 +810,11 @@ function getOpenPage(meta) {
     const hasPassword = ${hasPassword};
     const enableMarkdown = ${enableMarkdown};
     const inlineContent = ${inlineContentJs};
+    const createdAt = ${createdAt};
+    // 显示创建时间：跟随查看者系统时区，并附带时区标识（如 GMT+8）；
+    // 服务端预渲染的 UTC 文本仅作为 JS 被禁用时的回退
+    document.getElementById('createdAtDisplay').textContent =
+      new Date(createdAt).toLocaleString(undefined, { timeZoneName: 'short' });
     let currentPassword = '';
     let originalContent = '';
     let renderAvailable = enableMarkdown;
