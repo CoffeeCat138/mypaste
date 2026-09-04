@@ -751,6 +751,10 @@ function getOpenPage(meta) {
     .app-container { min-height: 100vh; display: flex; flex-direction: column; }
     .content-area { flex: 1; overflow-y: auto; }
     .warning-banner { background: #fef3c7; border: 1px solid #f59e0b; color: #92400e; padding: 10px; border-radius: 8px; margin-bottom: 15px; }
+    /* 长文本自动换行，防止单行过长时溢出容器（overflow-wrap 可继承，覆盖 Markdown 内部元素） */
+    #contentDisplay, #editPreview { overflow-wrap: break-word; word-wrap: break-word; }
+    /* 编辑分栏的 flex 子项允许收缩，避免长内容把预览框撑大 */
+    .edit-container > div { min-width: 0; }
     @media (max-width: 768px) {
       .edit-container { flex-direction: column; }
     }
