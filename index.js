@@ -724,8 +724,74 @@ function getOpenPage(meta) {
   ` : '';
 
   const markdownStyles = enableMarkdown ? `
-    .markdown-body { line-height: 1.6; }
+    .markdown-body { line-height: 1.6; color: #111827; overflow-wrap: break-word; }
+    .markdown-body > *:first-child { margin-top: 0 !important; }
+    .markdown-body > *:last-child { margin-bottom: 0 !important; }
     .katex { font-size: 1.1em; }
+
+    /* 标题（Tailwind Preflight 会把 h1~h6 的字号/加粗/边距清零，需手动恢复） */
+    .markdown-body h1, .markdown-body h2, .markdown-body h3,
+    .markdown-body h4, .markdown-body h5, .markdown-body h6 {
+      margin-top: 1.5em;
+      margin-bottom: 0.75em;
+      font-weight: 600;
+      line-height: 1.25;
+    }
+    .markdown-body h1 { font-size: 2em; padding-bottom: 0.3em; border-bottom: 1px solid #e5e7eb; }
+    .markdown-body h2 { font-size: 1.5em; padding-bottom: 0.3em; border-bottom: 1px solid #e5e7eb; }
+    .markdown-body h3 { font-size: 1.25em; }
+    .markdown-body h4 { font-size: 1em; }
+    .markdown-body h5 { font-size: 0.875em; }
+    .markdown-body h6 { font-size: 0.85em; color: #6b7280; }
+
+    /* 段落 */
+    .markdown-body p { margin: 0 0 1em; }
+
+    /* 列表（Preflight 清空了 list-style 与 padding） */
+    .markdown-body ul, .markdown-body ol { padding-left: 2em; margin: 0 0 1em; }
+    .markdown-body ul { list-style: disc; }
+    .markdown-body ol { list-style: decimal; }
+    .markdown-body li + li { margin-top: 0.25em; }
+    .markdown-body li > ul, .markdown-body li > ol { margin-top: 0.25em; margin-bottom: 0; }
+
+    /* 引用 */
+    .markdown-body blockquote {
+      margin: 0 0 1em;
+      padding: 0 1em;
+      color: #6b7280;
+      border-left: 0.25em solid #d1d5db;
+    }
+    .markdown-body blockquote > :first-child { margin-top: 0; }
+    .markdown-body blockquote > :last-child { margin-bottom: 0; }
+
+    /* 行内代码 */
+    .markdown-body :not(pre) > code {
+      padding: 0.2em 0.4em;
+      margin: 0;
+      font-size: 85%;
+      background: #f3f4f6;
+      border-radius: 6px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    }
+
+    /* 链接 */
+    .markdown-body a { color: #2563eb; text-decoration: none; }
+    .markdown-body a:hover { text-decoration: underline; }
+
+    /* 表格 */
+    .markdown-body table { display: block; width: max-content; max-width: 100%; overflow-x: auto; margin: 0 0 1em; border-collapse: collapse; }
+    .markdown-body table th, .markdown-body table td { border: 1px solid #d1d5db; padding: 0.5em 1em; }
+    .markdown-body table th { font-weight: 600; background: #f6f8fa; }
+    .markdown-body table tr:nth-child(2n) { background: #f9fafb; }
+
+    /* 图片与分割线 */
+    .markdown-body img { max-width: 100%; }
+    .markdown-body hr { height: 0.25em; padding: 0; margin: 1.5em 0; background: #e5e7eb; border: 0; }
+
+    /* 行内强调 */
+    .markdown-body strong { font-weight: 600; }
+    .markdown-body em { font-style: italic; }
+    .markdown-body del { text-decoration: line-through; }
 
     /* 代码块基础样式（Prism 主题仅负责 token 配色；21px 行高与 luogu-renderer 生成的行号/高亮定位对齐） */
     .markdown-body pre { position: relative; background: #f8f9fa; border-radius: 6px; padding: 21px; overflow-x: auto; }
