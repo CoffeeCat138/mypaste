@@ -718,45 +718,18 @@ function getOpenPage(meta) {
   const expiryText = expiresInDays === 0 ? '永不删除' : `${expiresInDays} 天后自动删除`;
 
   const markdownResources = enableMarkdown ? `
-  <script src="https://cdn.jsdelivr.net/npm/luogu-renderer@1.0.5/dist/luogu-new-renderer.iife.js"></script>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.css">
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/markdown-it@13/dist/markdown-it.min.js"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/markdown-it-texmath@1.0.0/texmath.min.js"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.9.0/styles/github.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.9.0/highlight.min.js"></script>
   ` : '';
 
   const markdownStyles = enableMarkdown ? `
     .markdown-body { line-height: 1.6; }
+    .markdown-body pre { background: #f6f8fa; padding: 1em; border-radius: 6px; overflow-x: auto; }
     .katex { font-size: 1.1em; }
-
-    /* 代码块基础样式（Prism 主题仅负责 token 配色；21px 行高与 luogu-renderer 生成的行号/高亮定位对齐） */
-    .markdown-body pre { position: relative; background: #f8f9fa; border-radius: 6px; padding: 21px; overflow-x: auto; }
-    .markdown-body pre, .markdown-body pre code { line-height: 21px; }
-    .markdown-body code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
-
-    /* 代码块行号 */
-    .markdown-body pre.line-numbers { padding-left: 3.8em; counter-reset: linenumber; }
-    .markdown-body pre.line-numbers code { position: relative; }
-    .markdown-body .line-numbers-rows { position: absolute; top: 0; left: -3.8em; width: 3em; border-right: 1px solid #e5e7eb; user-select: none; pointer-events: none; }
-    .markdown-body .line-numbers-rows > span { display: block; counter-increment: linenumber; }
-    .markdown-body .line-numbers-rows > span::before { content: counter(linenumber); color: #9ca3af; display: block; padding-right: 0.5em; text-align: right; }
-
-    /* 代码块高亮行（luogu-renderer 的 top 以 pre 顶部为基准，下移一个 21px 行高对齐到代码首行） */
-    .markdown-body pre .line-highlight { position: absolute; left: 0; right: 0; background: rgba(254, 240, 138, 0.4); pointer-events: none; transform: translateY(21px); }
-
-    /* 代码块复制按钮 */
-    .markdown-body .code-container { position: relative; }
-    .markdown-body .copy-button { position: absolute; top: 12px; right: 12px; background: transparent; border: none; cursor: pointer; color: #9ca3af; padding: 4px; border-radius: 4px; transition: color .2s; }
-    .markdown-body .copy-button:hover { color: #374151; background: #f3f4f6; }
-
-    /* 自定义容器 info/warning/error/success */
-    .markdown-body details { border: 1px solid #e5e7eb; border-radius: 8px; padding: 0.75em 1em; margin: 0.75em 0; }
-    .markdown-body details summary { cursor: pointer; font-weight: 600; }
-    .markdown-body details.info { background: #eff6ff; border-color: #bfdbfe; }
-    .markdown-body details.warning { background: #fffbeb; border-color: #fde68a; }
-    .markdown-body details.error { background: #fef2f2; border-color: #fecaca; }
-    .markdown-body details.success { background: #f0fdf4; border-color: #bbf7d0; }
-
-    /* 题头 epigraph */
-    .markdown-body .epigraph { border-left: 4px solid #e5e7eb; padding-left: 1em; color: #6b7280; margin: 0.75em 0; }
   ` : '';
 
   const inlineContentJs = inlineContent === null || inlineContent === undefined
@@ -850,19 +823,38 @@ function getOpenPage(meta) {
     let originalContent = '';
     let renderAvailable = enableMarkdown;
 
-    let renderer = null;
+    let md = null;
     if (enableMarkdown) {
-      if (typeof window.LuoguNewRenderer !== 'undefined' &&
-          typeof window.LuoguNewRenderer.render === 'function') {
-        renderer = window.LuoguNewRenderer;
-      } else {
+      try {
+        if (typeof window.markdownit !== 'undefined') {
+          md = window.markdownit({
+            html: false,
+            linkify: true,
+            highlight: function (str, lang) {
+              if (typeof hljs !== 'undefined' && lang && hljs.getLanguage(lang)) {
+                try { return hljs.highlight(str, { language: lang, ignoreIllegals: true }).value; } catch (__) {}
+              }
+              return '';
+            }
+          });
+          if (typeof window.texmath !== 'undefined' && typeof window.katex !== 'undefined') {
+            md.use(window.texmath, {
+              engine: window.katex,
+              delimiters: ['dollars', 'brackets'],
+              katexOptions: { throwOnError: false }
+            });
+          }
+        } else {
+          renderAvailable = false;
+        }
+      } catch (e) {
         renderAvailable = false;
       }
     }
 
-    async function renderMarkdown(text) {
-      if (!enableMarkdown || !renderAvailable || !renderer) return null;
-      try { return await renderer.render(text); } catch (e) { renderAvailable = false; return null; }
+    function renderMarkdown(text) {
+      if (!enableMarkdown || !renderAvailable || !md) return null;
+      try { return md.render(text); } catch (e) { renderAvailable = false; return null; }
     }
 
     function showWarning(message) {
@@ -871,18 +863,14 @@ function getOpenPage(meta) {
       banner.classList.remove('hidden');
     }
 
-    let renderSeq = 0; // 丢弃过期渲染结果，避免快速输入时预览错乱
-
-    async function setContent(container, text) {
+    function setContent(container, text) {
       if (enableMarkdown) {
-        const seq = ++renderSeq;
-        const rendered = await renderMarkdown(text);
-        if (seq !== renderSeq) return; // 已有更新的渲染请求，丢弃本次结果
+        const rendered = renderMarkdown(text);
         if (rendered !== null) {
           container.innerHTML = rendered;
         } else {
           container.textContent = text;
-          if (!renderAvailable) showWarning('⚠️ Markdown 渲染器加载失败，已显示原始文本。');
+          if (!renderAvailable) showWarning('⚠️ Markdown 渲染库加载失败，已显示原始文本。');
           else showWarning('⚠️ 渲染时出现错误，已显示原始文本。');
         }
       } else {
@@ -1021,27 +1009,6 @@ function getOpenPage(meta) {
           }
         }
       } catch (err) { alert('网络错误，请检查连接'); }
-    });
-
-    // luogu-renderer 生成的代码块复制按钮（事件委托，点击复制代码块内容）
-    document.addEventListener('click', async (e) => {
-      const btn = e.target.closest('.copy-button');
-      if (!btn) return;
-      const pre = btn.closest('.code-container')?.querySelector('pre');
-      if (!pre) return;
-      const text = pre.innerText;
-      try {
-        await navigator.clipboard.writeText(text);
-      } catch (err) {
-        const ta = document.createElement('textarea');
-        ta.value = text;
-        document.body.appendChild(ta);
-        ta.select();
-        document.execCommand('copy');
-        document.body.removeChild(ta);
-      }
-      btn.style.color = '#16a34a';
-      setTimeout(() => { btn.style.color = ''; }, 1500);
     });
 
     if (!hasPassword) {
