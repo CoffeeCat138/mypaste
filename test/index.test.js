@@ -170,6 +170,13 @@ test('空白内容创建被拒绝', async () => {
   assert.equal(res.status, 400);
 });
 
+test('空白内容更新被拒绝', async () => {
+  const env = makeEnv();
+  await createClipboard(env, 'empty-update', 'original');
+  const res = await callApi(env, '/api/update', { name: 'empty-update', content: '   ' });
+  assert.equal(res.status, 400);
+});
+
 test('内容超过 100KB 被拒绝', async () => {
   const env = makeEnv();
   const res = await createClipboard(env, 'big', 'x'.repeat(102401));
@@ -445,6 +452,15 @@ test('含 <script> 的内容内联时被安全转义', async () => {
   const res = await getPage(env, '/xss-test');
   const html = await res.text();
   assert.ok(!html.includes('</script><script>'));
+});
+
+test('Markdown CDN 资源带 SRI 完整性校验', async () => {
+  const env = makeEnv();
+  await createClipboard(env, 'sri-test', 'x');
+  const res = await getPage(env, '/sri-test');
+  const html = await res.text();
+  assert.ok(html.includes('integrity="sha384-'));
+  assert.ok(html.includes('crossorigin="anonymous"'));
 });
 
 test('favicon 与 robots 快速 404', async () => {

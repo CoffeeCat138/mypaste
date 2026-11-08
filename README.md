@@ -93,6 +93,8 @@ CREATE TABLE create_tokens (
 
 ### 3. 配置定时清理（Cron Trigger）
 
+`wrangler.toml` 已内置 Cron 配置（`[triggers] crons = ["0 * * * *"]`，每小时整点执行一次清理），使用 `wrangler deploy` 部署时会自动生效，无需手动配置。仅当你通过 **Dashboard 手动部署**时才需要以下步骤：
+
 1. 进入 Worker 页面，点击 **Triggers** 标签（中文界面为“触发器”）。
 2. 点击 **Add Cron Trigger**。
 3. 输入 Cron 表达式 `0 * * * *`（每小时整点执行一次）。
@@ -186,7 +188,7 @@ CREATE TABLE create_tokens (
 node test/index.test.js   # 或 npm test
 ```
 
-要求 Node 18+。测试覆盖：CRUD、密码校验、过期清理、创建验证令牌流程、CSRF 防护、限速、页面内联内容与 XSS 转义等（共 39 个用例）。
+要求 Node 18+。测试覆盖：CRUD、密码校验、过期清理、创建验证令牌流程、CSRF 防护、限速、页面内联内容与 XSS 转义、CDN 资源 SRI 完整性校验等（共 41 个用例）。
 
 ---
 

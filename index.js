@@ -375,7 +375,7 @@ async function verifyCreatePassword(body, request, env, createVerificationEnable
   if (isRateLimited(getClientIp(request), 'verify-create', RATE_LIMITS.verifyCreate)) {
     return jsonResponse({ error: '尝试次数过多，请稍后再试' }, 429);
   }
-  if (!allowedCreatePasswords.includes(password)) {
+  if (!allowedCreatePasswords.some((allowed) => timingSafeEqual(password, allowed))) {
     return jsonResponse({ error: '密码错误' }, 403);
   }
 
@@ -501,6 +501,9 @@ async function updateClipboard(body, request, env) {
   if (!name || typeof content !== 'string') {
     return jsonResponse({ error: '参数不完整' }, 400);
   }
+  if (content.trim() === '') {
+    return jsonResponse({ error: '内容不能为空' }, 400);
+  }
   if (content.length > MAX_CONTENT_LENGTH) {
     return jsonResponse({ error: '内容过长，最多 100KB' }, 413);
   }
@@ -564,7 +567,7 @@ function getHomePage() {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>云剪贴板</title>
   <link rel="icon" href="data:,">
-  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
 </head>
 <body class="bg-gray-50 min-h-screen flex items-center justify-center">
   <div class="text-center px-4">
@@ -583,7 +586,7 @@ function getVerifyPage(name) {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>验证 - ${escapeHtml(name)}</title>
   <link rel="icon" href="data:,">
-  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
 </head>
 <body class="bg-gray-50 min-h-screen flex items-center justify-center">
   <div class="max-w-md mx-auto bg-white rounded-xl shadow p-8">
@@ -643,7 +646,7 @@ function getCreatePage(name) {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>创建剪贴板 - ${escapeHtml(name)}</title>
   <link rel="icon" href="data:,">
-  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
 </head>
 <body class="bg-gray-50 min-h-screen py-12">
   <div class="max-w-2xl mx-auto bg-white rounded-xl shadow p-8">
@@ -718,12 +721,12 @@ function getOpenPage(meta) {
   const expiryText = expiresInDays === 0 ? '永不删除' : `${expiresInDays} 天后自动删除`;
 
   const markdownResources = enableMarkdown ? `
-  <script src="https://cdn.jsdelivr.net/npm/markdown-it@13/dist/markdown-it.min.js"></script>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
-  <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/markdown-it-texmath@1.0.0/texmath.min.js"></script>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.9.0/styles/github.min.css">
-  <script src="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.9.0/highlight.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/markdown-it@13.0.2/dist/markdown-it.min.js" integrity="sha384-iS/Lm1p6UwCovMGM5zjm6KQXwxbiNjuElmSYQGYKNpbQAFbwI75j/ebYEuxDVbRU" crossorigin="anonymous"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.47/dist/katex.min.css" integrity="sha384-nH0MfJ44wi1dd7w6jinlyBgljjS8EJAh2JBoRad8a3VDw2K69vfaaqm4WnR+gXtA" crossorigin="anonymous">
+  <script src="https://cdn.jsdelivr.net/npm/katex@0.16.47/dist/katex.min.js" integrity="sha384-CwjPRVHTvLiMBFjEoij+QZViMV5rhTOIp7CJzl24JEqpRDA1sJFHVXXLURktbYYp" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/markdown-it-texmath@1.0.0/texmath.min.js" integrity="sha384-IJTt8+6hpcfxunTzDwSuS8o8lsOFjDwoUddKsTvs+x8oa9muA1PbBBcXaz8D6yR0" crossorigin="anonymous"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.12.0/styles/github.min.css" integrity="sha384-eFTL69TLRZTkNfYZOLM+G04821K1qZao/4QLJbet1pP4tcF+fdXq/9CdqAbWRl/L" crossorigin="anonymous">
+  <script src="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.12.0/highlight.min.js" integrity="sha384-wjfDDhOPPdjtva8vWBhWeVprSpmxisEu5aYT3q1JyACqXpdKpo3PWZTMVq24MBix" crossorigin="anonymous"></script>
   ` : '';
 
   const markdownStyles = enableMarkdown ? `
@@ -743,7 +746,7 @@ function getOpenPage(meta) {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>剪贴板 - ${escapeHtml(name)}</title>
   <link rel="icon" href="data:,">
-  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
   ${markdownResources}
   <style>
     ${markdownStyles}
