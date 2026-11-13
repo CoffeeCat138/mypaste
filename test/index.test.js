@@ -468,9 +468,10 @@ test('Markdown 标题/段落样式在 Tailwind Preflight 下已恢复', async ()
   await createClipboard(env, 'md-style', 'x');
   const res = await getPage(env, '/md-style');
   const html = await res.text();
-  // Tailwind Preflight 会重置原生标题/列表样式；模板必须补充 .markdown-body 规则
-  assert.ok(html.includes('.markdown-body h1'));
-  assert.ok(html.includes('font-weight: 700'));
+  // Tailwind CDN 通过 JS 在运行时将 Preflight 注入到 head 末尾，
+  // 来源相同时源码顺序会覆盖我们的规则；因此每条 .markdown-body 规则必须带 !important
+  assert.ok(html.includes('.markdown-body h1 { font-size'));
+  assert.ok(html.includes('!important'));
   assert.ok(html.includes('.markdown-body p'));
   assert.ok(html.includes('.markdown-body ul'));
   assert.ok(html.includes('.markdown-body ol'));

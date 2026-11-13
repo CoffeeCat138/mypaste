@@ -729,32 +729,35 @@ function getOpenPage(meta) {
   <script src="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.12.0/highlight.min.js" integrity="sha384-wjfDDhOPPdjtva8vWBhWeVprSpmxisEu5aYT3q1JyACqXpdKpo3PWZTMVq24MBix" crossorigin="anonymous"></script>
   ` : '';
 
+  // Tailwind CDN 通过 JS 在运行时将 Preflight 注入到 head 末尾，
+  // 如果 bare 元素选择器（如 h1{font-size:inherit}）出现在我们的 .markdown-body 规则之后，
+  // 会因为来源相同而按源码顺序覆盖。添加 !important 确保优先。
   const markdownStyles = enableMarkdown ? `
     .markdown-body { line-height: 1.6; word-break: break-word; }
-    .markdown-body h1 { font-size: 2em; font-weight: 700; margin: 0.67em 0; }
-    .markdown-body h2 { font-size: 1.5em; font-weight: 600; margin: 0.75em 0; }
-    .markdown-body h3 { font-size: 1.25em; font-weight: 600; margin: 0.83em 0; }
-    .markdown-body h4 { font-size: 1em; font-weight: 600; margin: 1em 0; }
-    .markdown-body h5 { font-size: 0.875em; font-weight: 600; margin: 1em 0; }
-    .markdown-body h6 { font-size: 0.85em; font-weight: 600; color: #6b7280; margin: 1em 0; }
-    .markdown-body p { margin: 0.75em 0; }
-    .markdown-body ul, .markdown-body ol { margin: 0.75em 0; padding-left: 2em; }
-    .markdown-body ul { list-style-type: disc; }
-    .markdown-body ol { list-style-type: decimal; }
-    .markdown-body li { margin: 0.25em 0; }
-    .markdown-body blockquote { margin: 0.75em 0; padding: 0.25em 1em; border-left: 4px solid #d1d5db; color: #6b7280; }
-    .markdown-body table { border-collapse: collapse; margin: 0.75em 0; }
-    .markdown-body th, .markdown-body td { border: 1px solid #d1d5db; padding: 0.5em 0.75em; text-align: left; }
-    .markdown-body th { background: #f3f4f6; font-weight: 600; }
-    .markdown-body tr:nth-child(even) td { background: #f9fafb; }
-    .markdown-body code:not(pre code) { background: #f3f4f6; padding: 0.15em 0.35em; border-radius: 3px; font-size: 0.9em; }
-    .markdown-body pre { background: #f6f8fa; padding: 1em; border-radius: 6px; overflow-x: auto; margin: 0.75em 0; }
-    .markdown-body pre code { padding: 0; background: none; }
-    .markdown-body hr { margin: 1.5em 0; border: 0; border-top: 1px solid #e5e7eb; }
-    .markdown-body img { max-width: 100%; height: auto; border-radius: 6px; }
-    .markdown-body a { color: #2563eb; text-decoration: underline; }
-    .markdown-body a:hover { color: #1d4ed8; }
-    .katex { font-size: 1.1em; }
+    .markdown-body h1 { font-size: 2em !important; font-weight: 700 !important; margin: 0.67em 0 !important; }
+    .markdown-body h2 { font-size: 1.5em !important; font-weight: 600 !important; margin: 0.75em 0 !important; }
+    .markdown-body h3 { font-size: 1.25em !important; font-weight: 600 !important; margin: 0.83em 0 !important; }
+    .markdown-body h4 { font-size: 1em !important; font-weight: 600 !important; margin: 1em 0 !important; }
+    .markdown-body h5 { font-size: 0.875em !important; font-weight: 600 !important; margin: 1em 0 !important; }
+    .markdown-body h6 { font-size: 0.85em !important; font-weight: 600 !important; color: #6b7280 !important; margin: 1em 0 !important; }
+    .markdown-body p { margin: 0.75em 0 !important; }
+    .markdown-body ul, .markdown-body ol { margin: 0.75em 0 !important; padding-left: 2em !important; }
+    .markdown-body ul { list-style-type: disc !important; }
+    .markdown-body ol { list-style-type: decimal !important; }
+    .markdown-body li { margin: 0.25em 0 !important; }
+    .markdown-body blockquote { margin: 0.75em 0 !important; padding: 0.25em 1em !important; border-left: 4px solid #d1d5db !important; color: #6b7280 !important; }
+    .markdown-body table { border-collapse: collapse !important; margin: 0.75em 0 !important; }
+    .markdown-body th, .markdown-body td { border: 1px solid #d1d5db !important; padding: 0.5em 0.75em !important; text-align: left !important; }
+    .markdown-body th { background: #f3f4f6 !important; font-weight: 600 !important; }
+    .markdown-body tr:nth-child(even) td { background: #f9fafb !important; }
+    .markdown-body code:not(pre code) { background: #f3f4f6 !important; padding: 0.15em 0.35em !important; border-radius: 3px !important; font-size: 0.9em !important; }
+    .markdown-body pre { background: #f6f8fa !important; padding: 1em !important; border-radius: 6px !important; overflow-x: auto !important; margin: 0.75em 0 !important; }
+    .markdown-body pre code { padding: 0 !important; background: none !important; }
+    .markdown-body hr { margin: 1.5em 0 !important; border: 0 !important; border-top: 1px solid #e5e7eb !important; }
+    .markdown-body img { max-width: 100% !important; height: auto !important; border-radius: 6px !important; }
+    .markdown-body a { color: #2563eb !important; text-decoration: underline !important; }
+    .markdown-body a:hover { color: #1d4ed8 !important; }
+    .katex { font-size: 1.1em !important; }
   ` : '';
 
   const inlineContentJs = inlineContent === null || inlineContent === undefined
