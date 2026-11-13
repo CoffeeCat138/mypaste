@@ -759,10 +759,13 @@ function getOpenPage(meta) {
     .markdown-body :not(pre) > code { background: #f3f4f6; padding: 0.15em 0.35em; border-radius: 3px; font-size: 0.9em; }
     .markdown-body pre code { padding: 0; background: none; }
 
-    /* 代码块—键复制按钮（luogu-renderer 1.0.5 已内置 .code-container 和 .copy-button 的 HTML 结构，此处仅补全样式并添加 hover 时显示逻辑） */
+    /* 代码块一键复制按钮（luogu-renderer 1.0.5 已内置 .code-container 和 .copy-button HTML 结构） */
     .markdown-body .code-container { position: relative; }
-    .markdown-body .copy-button { position: absolute; top: 12px; right: 12px; background: transparent; border: none; cursor: pointer; color: #9ca3af; padding: 4px; border-radius: 4px; transition: color .2s, opacity .2s; opacity: 0; }
-    .markdown-body .code-container:hover .copy-button { opacity: 1; }
+    /* 悬停时显示复制按钮（默认透明，hover 后显现） */
+    .markdown-body .copy-button { position: absolute; top: 8px; right: 8px; background: transparent; border: none; cursor: pointer; color: #9ca3af; padding: 6px; border-radius: 4px; opacity: 0; transition: opacity .2s, color .2s, background .2s; pointer-events: auto; z-index: 1; }
+    .markdown-body .code-container:hover .copy-button,
+    .markdown-body pre:hover + .copy-button,
+    .markdown-body .copy-button:hover { opacity: 1; }
     .markdown-body .copy-button:hover { color: #374151; background: #f3f4f6; }
 
     /* 代码块行号 */
