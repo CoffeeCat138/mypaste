@@ -454,28 +454,28 @@ test('含 <script> 的内容内联时被安全转义', async () => {
   assert.ok(!html.includes('</script><script>'));
 });
 
-test('Markdown CDN 资源带 SRI 完整性校验', async () => {
+test('Markdown CDN 资源使用 luogu-renderer', async () => {
   const env = makeEnv();
-  await createClipboard(env, 'sri-test', 'x');
-  const res = await getPage(env, '/sri-test');
+  await createClipboard(env, 'luogu-test', 'x');
+  const res = await getPage(env, '/luogu-test');
   const html = await res.text();
-  assert.ok(html.includes('integrity="sha384-'));
-  assert.ok(html.includes('crossorigin="anonymous"'));
+  assert.ok(html.includes('luogu-renderer@1.0.5'));
+  assert.ok(html.includes('luogu-new-renderer.iife.js'));
 });
 
-test('Markdown 标题/段落样式在 Tailwind Preflight 下已恢复', async () => {
+test('Markdown 样式包含 luogu-renderer 和代码块布局', async () => {
   const env = makeEnv();
   await createClipboard(env, 'md-style', 'x');
   const res = await getPage(env, '/md-style');
   const html = await res.text();
-  // Tailwind CDN 通过 JS 在运行时将 Preflight 注入到 head 末尾，
-  // 来源相同时源码顺序会覆盖我们的规则；因此每条 .markdown-body 规则必须带 !important
-  assert.ok(html.includes('.markdown-body h1 { font-size'));
-  assert.ok(html.includes('!important'));
-  assert.ok(html.includes('.markdown-body p'));
-  assert.ok(html.includes('.markdown-body ul'));
-  assert.ok(html.includes('.markdown-body ol'));
-  assert.ok(html.includes('.markdown-body blockquote'));
+  // luogu-renderer 自带代码块增强样式
+  assert.ok(html.includes('.markdown-body pre { position: relative'));
+  assert.ok(html.includes('.code-container'));
+  assert.ok(html.includes('.copy-button'));
+  assert.ok(html.includes('.line-numbers'));
+  assert.ok(html.includes('.epigraph'));
+  // Prism 代码高亮主题
+  assert.ok(html.includes('prismjs@1.29.0'));
 });
 
 test('favicon 与 robots 快速 404', async () => {

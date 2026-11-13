@@ -721,43 +721,45 @@ function getOpenPage(meta) {
   const expiryText = expiresInDays === 0 ? '永不删除' : `${expiresInDays} 天后自动删除`;
 
   const markdownResources = enableMarkdown ? `
-  <script src="https://cdn.jsdelivr.net/npm/markdown-it@13.0.2/dist/markdown-it.min.js" integrity="sha384-iS/Lm1p6UwCovMGM5zjm6KQXwxbiNjuElmSYQGYKNpbQAFbwI75j/ebYEuxDVbRU" crossorigin="anonymous"></script>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.47/dist/katex.min.css" integrity="sha384-nH0MfJ44wi1dd7w6jinlyBgljjS8EJAh2JBoRad8a3VDw2K69vfaaqm4WnR+gXtA" crossorigin="anonymous">
-  <script src="https://cdn.jsdelivr.net/npm/katex@0.16.47/dist/katex.min.js" integrity="sha384-CwjPRVHTvLiMBFjEoij+QZViMV5rhTOIp7CJzl24JEqpRDA1sJFHVXXLURktbYYp" crossorigin="anonymous"></script>
-  <script src="https://cdn.jsdelivr.net/npm/markdown-it-texmath@1.0.0/texmath.min.js" integrity="sha384-IJTt8+6hpcfxunTzDwSuS8o8lsOFjDwoUddKsTvs+x8oa9muA1PbBBcXaz8D6yR0" crossorigin="anonymous"></script>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.12.0/styles/github.min.css" integrity="sha384-eFTL69TLRZTkNfYZOLM+G04821K1qZao/4QLJbet1pP4tcF+fdXq/9CdqAbWRl/L" crossorigin="anonymous">
-  <script src="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.12.0/highlight.min.js" integrity="sha384-wjfDDhOPPdjtva8vWBhWeVprSpmxisEu5aYT3q1JyACqXpdKpo3PWZTMVq24MBix" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/luogu-renderer@1.0.5/dist/luogu-new-renderer.iife.js"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism.min.css">
   ` : '';
 
-  // Tailwind CDN 通过 JS 在运行时将 Preflight 注入到 head 末尾，
-  // 如果 bare 元素选择器（如 h1{font-size:inherit}）出现在我们的 .markdown-body 规则之后，
-  // 会因为来源相同而按源码顺序覆盖。添加 !important 确保优先。
   const markdownStyles = enableMarkdown ? `
-    .markdown-body { line-height: 1.6; word-break: break-word; }
-    .markdown-body h1 { font-size: 2em !important; font-weight: 700 !important; margin: 0.67em 0 !important; }
-    .markdown-body h2 { font-size: 1.5em !important; font-weight: 600 !important; margin: 0.75em 0 !important; }
-    .markdown-body h3 { font-size: 1.25em !important; font-weight: 600 !important; margin: 0.83em 0 !important; }
-    .markdown-body h4 { font-size: 1em !important; font-weight: 600 !important; margin: 1em 0 !important; }
-    .markdown-body h5 { font-size: 0.875em !important; font-weight: 600 !important; margin: 1em 0 !important; }
-    .markdown-body h6 { font-size: 0.85em !important; font-weight: 600 !important; color: #6b7280 !important; margin: 1em 0 !important; }
-    .markdown-body p { margin: 0.75em 0 !important; }
-    .markdown-body ul, .markdown-body ol { margin: 0.75em 0 !important; padding-left: 2em !important; }
-    .markdown-body ul { list-style-type: disc !important; }
-    .markdown-body ol { list-style-type: decimal !important; }
-    .markdown-body li { margin: 0.25em 0 !important; }
-    .markdown-body blockquote { margin: 0.75em 0 !important; padding: 0.25em 1em !important; border-left: 4px solid #d1d5db !important; color: #6b7280 !important; }
-    .markdown-body table { border-collapse: collapse !important; margin: 0.75em 0 !important; }
-    .markdown-body th, .markdown-body td { border: 1px solid #d1d5db !important; padding: 0.5em 0.75em !important; text-align: left !important; }
-    .markdown-body th { background: #f3f4f6 !important; font-weight: 600 !important; }
-    .markdown-body tr:nth-child(even) td { background: #f9fafb !important; }
-    .markdown-body code:not(pre code) { background: #f3f4f6 !important; padding: 0.15em 0.35em !important; border-radius: 3px !important; font-size: 0.9em !important; }
-    .markdown-body pre { background: #f6f8fa !important; padding: 1em !important; border-radius: 6px !important; overflow-x: auto !important; margin: 0.75em 0 !important; }
-    .markdown-body pre code { padding: 0 !important; background: none !important; }
-    .markdown-body hr { margin: 1.5em 0 !important; border: 0 !important; border-top: 1px solid #e5e7eb !important; }
-    .markdown-body img { max-width: 100% !important; height: auto !important; border-radius: 6px !important; }
-    .markdown-body a { color: #2563eb !important; text-decoration: underline !important; }
-    .markdown-body a:hover { color: #1d4ed8 !important; }
-    .katex { font-size: 1.1em !important; }
+    .markdown-body { line-height: 1.6; }
+    .katex { font-size: 1.1em; }
+
+    /* 代码块基础样式（Prism 主题仅负责 token 配色；21px 行高与 luogu-renderer 生成的行号/高亮定位对齐） */
+    .markdown-body pre { position: relative; background: #f8f9fa; border-radius: 6px; padding: 21px; overflow-x: auto; }
+    .markdown-body pre, .markdown-body pre code { line-height: 21px; }
+    .markdown-body code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+
+    /* 代码块行号 */
+    .markdown-body pre.line-numbers { padding-left: 3.8em; counter-reset: linenumber; }
+    .markdown-body pre.line-numbers code { position: relative; }
+    .markdown-body .line-numbers-rows { position: absolute; top: 0; left: -3.8em; width: 3em; border-right: 1px solid #e5e7eb; user-select: none; pointer-events: none; }
+    .markdown-body .line-numbers-rows > span { display: block; counter-increment: linenumber; }
+    .markdown-body .line-numbers-rows > span::before { content: counter(linenumber); color: #9ca3af; display: block; padding-right: 0.5em; text-align: right; }
+
+    /* 代码块高亮行（luogu-renderer 的 top 以 pre 顶部为基准，下移一个 21px 行高对齐到代码首行） */
+    .markdown-body pre .line-highlight { position: absolute; left: 0; right: 0; background: rgba(254, 240, 138, 0.4); pointer-events: none; transform: translateY(21px); }
+
+    /* 代码块复制按钮 */
+    .markdown-body .code-container { position: relative; }
+    .markdown-body .copy-button { position: absolute; top: 12px; right: 12px; background: transparent; border: none; cursor: pointer; color: #9ca3af; padding: 4px; border-radius: 4px; transition: color .2s; }
+    .markdown-body .copy-button:hover { color: #374151; background: #f3f4f6; }
+
+    /* 自定义容器 info/warning/error/success */
+    .markdown-body details { border: 1px solid #e5e7eb; border-radius: 8px; padding: 0.75em 1em; margin: 0.75em 0; }
+    .markdown-body details summary { cursor: pointer; font-weight: 600; }
+    .markdown-body details.info { background: #eff6ff; border-color: #bfdbfe; }
+    .markdown-body details.warning { background: #fffbeb; border-color: #fde68a; }
+    .markdown-body details.error { background: #fef2f2; border-color: #fecaca; }
+    .markdown-body details.success { background: #f0fdf4; border-color: #bbf7d0; }
+
+    /* 题头 epigraph */
+    .markdown-body .epigraph { border-left: 4px solid #e5e7eb; padding-left: 1em; color: #6b7280; margin: 0.75em 0; }
   ` : '';
 
   const inlineContentJs = inlineContent === null || inlineContent === undefined
@@ -851,38 +853,19 @@ function getOpenPage(meta) {
     let originalContent = '';
     let renderAvailable = enableMarkdown;
 
-    let md = null;
+    let renderer = null;
     if (enableMarkdown) {
-      try {
-        if (typeof window.markdownit !== 'undefined') {
-          md = window.markdownit({
-            html: false,
-            linkify: true,
-            highlight: function (str, lang) {
-              if (typeof hljs !== 'undefined' && lang && hljs.getLanguage(lang)) {
-                try { return hljs.highlight(str, { language: lang, ignoreIllegals: true }).value; } catch (__) {}
-              }
-              return '';
-            }
-          });
-          if (typeof window.texmath !== 'undefined' && typeof window.katex !== 'undefined') {
-            md.use(window.texmath, {
-              engine: window.katex,
-              delimiters: ['dollars', 'brackets'],
-              katexOptions: { throwOnError: false }
-            });
-          }
-        } else {
-          renderAvailable = false;
-        }
-      } catch (e) {
+      if (typeof window.LuoguNewRenderer !== 'undefined' &&
+          typeof window.LuoguNewRenderer.render === 'function') {
+        renderer = window.LuoguNewRenderer;
+      } else {
         renderAvailable = false;
       }
     }
 
-    function renderMarkdown(text) {
-      if (!enableMarkdown || !renderAvailable || !md) return null;
-      try { return md.render(text); } catch (e) { renderAvailable = false; return null; }
+    async function renderMarkdown(text) {
+      if (!enableMarkdown || !renderAvailable || !renderer) return null;
+      try { return await renderer.render(text); } catch (e) { renderAvailable = false; return null; }
     }
 
     function showWarning(message) {
@@ -891,14 +874,18 @@ function getOpenPage(meta) {
       banner.classList.remove('hidden');
     }
 
-    function setContent(container, text) {
+    let renderSeq = 0; // 丢弃过期渲染结果，避免快速输入时预览错乱
+
+    async function setContent(container, text) {
       if (enableMarkdown) {
-        const rendered = renderMarkdown(text);
+        const seq = ++renderSeq;
+        const rendered = await renderMarkdown(text);
+        if (seq !== renderSeq) return; // 已有更新的渲染请求，丢弃本次结果
         if (rendered !== null) {
           container.innerHTML = rendered;
         } else {
           container.textContent = text;
-          if (!renderAvailable) showWarning('⚠️ Markdown 渲染库加载失败，已显示原始文本。');
+          if (!renderAvailable) showWarning('⚠️ Markdown 渲染器加载失败，已显示原始文本。');
           else showWarning('⚠️ 渲染时出现错误，已显示原始文本。');
         }
       } else {
@@ -1037,6 +1024,27 @@ function getOpenPage(meta) {
           }
         }
       } catch (err) { alert('网络错误，请检查连接'); }
+    });
+
+    // luogu-renderer 生成的代码块复制按钮（事件委托，点击复制代码块内容）
+    document.addEventListener('click', async (e) => {
+      const btn = e.target.closest('.copy-button');
+      if (!btn) return;
+      const pre = btn.closest('.code-container')?.querySelector('pre');
+      if (!pre) return;
+      const text = pre.innerText;
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch (err) {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      }
+      btn.style.color = '#16a34a';
+      setTimeout(() => { btn.style.color = ''; }, 1500);
     });
 
     if (!hasPassword) {
