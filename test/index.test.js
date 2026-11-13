@@ -463,6 +463,20 @@ test('Markdown CDN 资源带 SRI 完整性校验', async () => {
   assert.ok(html.includes('crossorigin="anonymous"'));
 });
 
+test('Markdown 标题/段落样式在 Tailwind Preflight 下已恢复', async () => {
+  const env = makeEnv();
+  await createClipboard(env, 'md-style', 'x');
+  const res = await getPage(env, '/md-style');
+  const html = await res.text();
+  // Tailwind Preflight 会重置原生标题/列表样式；模板必须补充 .markdown-body 规则
+  assert.ok(html.includes('.markdown-body h1'));
+  assert.ok(html.includes('font-weight: 700'));
+  assert.ok(html.includes('.markdown-body p'));
+  assert.ok(html.includes('.markdown-body ul'));
+  assert.ok(html.includes('.markdown-body ol'));
+  assert.ok(html.includes('.markdown-body blockquote'));
+});
+
 test('favicon 与 robots 快速 404', async () => {
   const env = makeEnv();
   assert.equal((await getPage(env, '/favicon.ico')).status, 404);

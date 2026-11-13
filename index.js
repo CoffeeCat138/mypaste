@@ -730,8 +730,30 @@ function getOpenPage(meta) {
   ` : '';
 
   const markdownStyles = enableMarkdown ? `
-    .markdown-body { line-height: 1.6; }
-    .markdown-body pre { background: #f6f8fa; padding: 1em; border-radius: 6px; overflow-x: auto; }
+    .markdown-body { line-height: 1.6; word-break: break-word; }
+    .markdown-body h1 { font-size: 2em; font-weight: 700; margin: 0.67em 0; }
+    .markdown-body h2 { font-size: 1.5em; font-weight: 600; margin: 0.75em 0; }
+    .markdown-body h3 { font-size: 1.25em; font-weight: 600; margin: 0.83em 0; }
+    .markdown-body h4 { font-size: 1em; font-weight: 600; margin: 1em 0; }
+    .markdown-body h5 { font-size: 0.875em; font-weight: 600; margin: 1em 0; }
+    .markdown-body h6 { font-size: 0.85em; font-weight: 600; color: #6b7280; margin: 1em 0; }
+    .markdown-body p { margin: 0.75em 0; }
+    .markdown-body ul, .markdown-body ol { margin: 0.75em 0; padding-left: 2em; }
+    .markdown-body ul { list-style-type: disc; }
+    .markdown-body ol { list-style-type: decimal; }
+    .markdown-body li { margin: 0.25em 0; }
+    .markdown-body blockquote { margin: 0.75em 0; padding: 0.25em 1em; border-left: 4px solid #d1d5db; color: #6b7280; }
+    .markdown-body table { border-collapse: collapse; margin: 0.75em 0; }
+    .markdown-body th, .markdown-body td { border: 1px solid #d1d5db; padding: 0.5em 0.75em; text-align: left; }
+    .markdown-body th { background: #f3f4f6; font-weight: 600; }
+    .markdown-body tr:nth-child(even) td { background: #f9fafb; }
+    .markdown-body code:not(pre code) { background: #f3f4f6; padding: 0.15em 0.35em; border-radius: 3px; font-size: 0.9em; }
+    .markdown-body pre { background: #f6f8fa; padding: 1em; border-radius: 6px; overflow-x: auto; margin: 0.75em 0; }
+    .markdown-body pre code { padding: 0; background: none; }
+    .markdown-body hr { margin: 1.5em 0; border: 0; border-top: 1px solid #e5e7eb; }
+    .markdown-body img { max-width: 100%; height: auto; border-radius: 6px; }
+    .markdown-body a { color: #2563eb; text-decoration: underline; }
+    .markdown-body a:hover { color: #1d4ed8; }
     .katex { font-size: 1.1em; }
   ` : '';
 
