@@ -463,13 +463,20 @@ test('Markdown CDN 资源使用 luogu-renderer', async () => {
   assert.ok(html.includes('luogu-new-renderer.iife.js'));
 });
 
-test('Markdown 样式包含 luogu-renderer 和代码块布局', async () => {
+test('Markdown 样式包含标题/段落/列表/引用/表格等语义标签', async () => {
   const env = makeEnv();
   await createClipboard(env, 'md-style', 'x');
   const res = await getPage(env, '/md-style');
   const html = await res.text();
-  // luogu-renderer 自带代码块增强样式
-  assert.ok(html.includes('.markdown-body pre { position: relative'));
+  // luogu-renderer 不含 CSS，需自行提供语义标签样式以防 Tailwind Preflight 重置
+  assert.ok(html.includes('.markdown-body h1 { font-size'));
+  assert.ok(html.includes('.markdown-body h2'));
+  assert.ok(html.includes('.markdown-body p'));
+  assert.ok(html.includes('.markdown-body ul'));
+  assert.ok(html.includes('.markdown-body ol'));
+  assert.ok(html.includes('.markdown-body blockquote'));
+  assert.ok(html.includes('.markdown-body table'));
+  // luogu-renderer 代码块增强样式
   assert.ok(html.includes('.code-container'));
   assert.ok(html.includes('.copy-button'));
   assert.ok(html.includes('.line-numbers'));

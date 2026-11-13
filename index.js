@@ -727,13 +727,37 @@ function getOpenPage(meta) {
   ` : '';
 
   const markdownStyles = enableMarkdown ? `
-    .markdown-body { line-height: 1.6; }
+    .markdown-body { line-height: 1.6; word-break: break-word; }
     .katex { font-size: 1.1em; }
+
+    /* 标题/段落/列表/引用/表格等语义标签（luogu-renderer 不含 CSS，Tailwind Preflight 会重置） */
+    .markdown-body h1 { font-size: 2em; font-weight: 700; margin: 0.67em 0; }
+    .markdown-body h2 { font-size: 1.5em; font-weight: 600; margin: 0.75em 0; }
+    .markdown-body h3 { font-size: 1.25em; font-weight: 600; margin: 0.83em 0; }
+    .markdown-body h4 { font-size: 1em; font-weight: 600; margin: 1em 0; }
+    .markdown-body h5 { font-size: 0.875em; font-weight: 600; margin: 1em 0; }
+    .markdown-body h6 { font-size: 0.85em; font-weight: 600; color: #6b7280; margin: 1em 0; }
+    .markdown-body p { margin: 0.75em 0; }
+    .markdown-body ul, .markdown-body ol { margin: 0.75em 0; padding-left: 2em; }
+    .markdown-body ul { list-style-type: disc; }
+    .markdown-body ol { list-style-type: decimal; }
+    .markdown-body li { margin: 0.25em 0; }
+    .markdown-body blockquote { margin: 0.75em 0; padding: 0.25em 1em; border-left: 4px solid #d1d5db; color: #6b7280; }
+    .markdown-body table { border-collapse: collapse; margin: 0.75em 0; }
+    .markdown-body th, .markdown-body td { border: 1px solid #d1d5db; padding: 0.5em 0.75em; text-align: left; }
+    .markdown-body th { background: #f3f4f6; font-weight: 600; }
+    .markdown-body tr:nth-child(even) td { background: #f9fafb; }
+    .markdown-body hr { margin: 1.5em 0; border: 0; border-top: 1px solid #e5e7eb; }
+    .markdown-body img { max-width: 100%; height: auto; border-radius: 6px; }
+    .markdown-body a { color: #2563eb; text-decoration: underline; }
+    .markdown-body a:hover { color: #1d4ed8; }
 
     /* 代码块基础样式（Prism 主题仅负责 token 配色；21px 行高与 luogu-renderer 生成的行号/高亮定位对齐） */
     .markdown-body pre { position: relative; background: #f8f9fa; border-radius: 6px; padding: 21px; overflow-x: auto; }
     .markdown-body pre, .markdown-body pre code { line-height: 21px; }
     .markdown-body code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+    .markdown-body :not(pre) > code { background: #f3f4f6; padding: 0.15em 0.35em; border-radius: 3px; font-size: 0.9em; }
+    .markdown-body pre code { padding: 0; background: none; }
 
     /* 代码块行号 */
     .markdown-body pre.line-numbers { padding-left: 3.8em; counter-reset: linenumber; }
