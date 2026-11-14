@@ -761,12 +761,18 @@ function getOpenPage(meta) {
 
     /* 代码块一键复制按钮（luogu-renderer 1.0.5 已内置 .code-container 和 .copy-button HTML 结构） */
     .markdown-body .code-container { position: relative; }
-    /* 悬停时显示复制按钮（默认透明，hover 后显现） */
-    .markdown-body .copy-button { position: absolute; top: 8px; right: 8px; background: transparent; border: none; cursor: pointer; color: #9ca3af; padding: 6px; border-radius: 4px; opacity: 0; transition: opacity .2s, color .2s, background .2s; pointer-events: auto; z-index: 1; }
-    .markdown-body .code-container:hover .copy-button,
-    .markdown-body pre:hover + .copy-button,
-    .markdown-body .copy-button:hover { opacity: 1; }
-    .markdown-body .copy-button:hover { color: #374151; background: #f3f4f6; }
+    .markdown-body .copy-button {
+      position: absolute; top: 8px; right: 8px;
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 32px; height: 32px;
+      background: rgba(255,255,255,0.85); border: 1px solid #e5e7eb;
+      cursor: pointer; color: #6b7280; padding: 4px; border-radius: 6px;
+      opacity: 1; z-index: 1;
+      transition: color .15s, background .15s, border-color .15s;
+      backdrop-filter: blur(4px);
+    }
+    .markdown-body .copy-button:hover { color: #1f2937; background: #fff; border-color: #9ca3af; }
+    .markdown-body .copy-button svg { width: 16px; height: 16px; display: block; }
 
     /* 代码块行号 */
     .markdown-body pre.line-numbers { padding-left: 3.8em; counter-reset: linenumber; }
