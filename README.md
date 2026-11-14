@@ -9,8 +9,8 @@
 - 🖥️ **全屏布局**：剪贴板页面充满视口，顶部工具栏固定，内容区域自适应滚动。
 - 🎨 **现代 UI**：基于 Tailwind CSS，简洁美观，响应式设计。
 - 📝 **可选 Markdown 渲染**：创建时可勾选“启用 Markdown”，支持 GFM；若未勾选，纯文本显示，不加载渲染库，加载更快。
-- 🔢 **LaTeX 数学公式**：启用 Markdown 后，通过 `markdown-it-texmath` + `KaTeX` 渲染 `$...$` 和 `$$...$$`。
-- 🌈 **代码高亮**：启用 Markdown 后，集成 `highlight.js`，支持多种编程语言。
+- 🔢 **LaTeX 数学公式**：启用 Markdown 后，通过 `luogu-renderer`（内建 KaTeX + PrismJS）渲染 `$...$` 和 `$$...$$`。
+- 🌈 **代码高亮**：启用 Markdown 后，集成 `PrismJS`，支持多种编程语言。
 - 🔒 **剪贴板密码**：每个剪贴板可设置访问密码（可选），密码使用 PBKDF2 加随机盐哈希存储。
 - 🛡️ **全局创建验证**：可配置 `CREATE_PASSWORD` 和 `ALLOWED_PASSWORDS`，要求用户输入正确密码后才能创建剪贴板；令牌 10 分钟有效、绑定剪贴板名称、通过 HttpOnly Cookie 传递（不出现在 URL 中）。
 - 🚦 **暴力破解防护**：创建验证与剪贴板密码均按 IP 限速（10 次 / 10 分钟，超过返回 429）。
@@ -188,13 +188,13 @@ CREATE TABLE create_tokens (
 node test/index.test.js   # 或 npm test
 ```
 
-要求 Node 18+。测试覆盖：CRUD、密码校验、过期清理、创建验证令牌流程、CSRF 防护、限速、页面内联内容与 XSS 转义、CDN 资源 SRI 完整性校验等（共 41 个用例）。
+要求 Node 18+。测试覆盖：CRUD、密码校验、过期清理、创建验证令牌流程、CSRF 防护、限速、页面内联内容与 XSS 转义、CDN 资源 SRI 完整性校验等（共 50 个用例）。
 
 ---
 
 ## ⚠️ 注意事项
 
-- **依赖 CDN**：前端需要加载 Tailwind CSS、markdown-it、KaTeX 等库（仅当启用 Markdown 时）。请确保用户网络可以访问这些 CDN。  
+- **依赖 CDN**：前端需要加载 Tailwind CSS、luogu-renderer、KaTeX、PrismJS 等库（仅当启用 Markdown 时）。请确保用户网络可以访问这些 CDN。  
 - **数据安全**：剪贴板密码使用 PBKDF2（随机盐 + 默认 10000 次迭代）哈希存储，不同剪贴板即使密码相同哈希也不同；传输过程依赖 HTTPS 加密，请务必启用 TLS。若曾使用旧版本（无盐 SHA-256），旧哈希无法通过新校验逻辑验证，需重新设置密码。  
 - **限速说明**：暴力破解限速基于 Worker 内存计数（按 IP），多 isolate 间不共享且重启后重置，属于基础防护而非绝对保障。  
 - **创建令牌**：通过 HttpOnly + SameSite=Lax Cookie 传递，10 分钟有效，创建成功后立即作废，且与剪贴板名称绑定。  
@@ -216,7 +216,6 @@ MIT License
 本项目使用了以下开源库：
 
 - [Tailwind CSS](https://tailwindcss.com/)  
-- [markdown-it](https://github.com/markdown-it/markdown-it)  
+- [luogu-renderer](https://github.com/luogu-dev/luogu-renderer)  
 - [KaTeX](https://katex.org/)  
-- [highlight.js](https://highlightjs.org/)  
-- [markdown-it-texmath](https://github.com/goessner/markdown-it-texmath)
+- [PrismJS](https://prismjs.com/)

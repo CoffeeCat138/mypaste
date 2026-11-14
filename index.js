@@ -646,7 +646,7 @@ function getHomePage() {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>云剪贴板</title>
   <link rel="icon" href="data:,">
-  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
+  <script src="https://cdn.tailwindcss.com/3.4.17" integrity="sha384-igm5BeiBt36UU4gqwWS7imYmelpTsZlQ45FZf+XBn9MuJbn4nQr7yx1yFydocC/K" crossorigin="anonymous"></script>
 </head>
 <body class="bg-gray-50 min-h-screen flex items-center justify-center">
   <div class="text-center px-4">
@@ -665,7 +665,7 @@ function getVerifyPage(name) {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>验证 - ${escapeHtml(name)}</title>
   <link rel="icon" href="data:,">
-  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
+  <script src="https://cdn.tailwindcss.com/3.4.17" integrity="sha384-igm5BeiBt36UU4gqwWS7imYmelpTsZlQ45FZf+XBn9MuJbn4nQr7yx1yFydocC/K" crossorigin="anonymous"></script>
 </head>
 <body class="bg-gray-50 min-h-screen flex items-center justify-center">
   <div class="max-w-md mx-auto bg-white rounded-xl shadow p-8">
@@ -725,11 +725,11 @@ function getCreatePage(name) {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>创建剪贴板 - ${escapeHtml(name)}</title>
   <link rel="icon" href="data:,">
-  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
+  <script src="https://cdn.tailwindcss.com/3.4.17" integrity="sha384-igm5BeiBt36UU4gqwWS7imYmelpTsZlQ45FZf+XBn9MuJbn4nQr7yx1yFydocC/K" crossorigin="anonymous"></script>
   <!-- 默认启用 Markdown 资源（用户可取消勾选复选框） -->
-  <script src="https://cdn.jsdelivr.net/npm/luogu-renderer@1.0.5/dist/luogu-new-renderer.iife.js"></script>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.css">
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/luogu-renderer@1.0.5/dist/luogu-new-renderer.iife.js" integrity="sha384-uvo+AtndM549/9r8QeKtZ5fKy+TjqF/ssIXqMp2Fj4LZovtfKymdOjOkVFGtoX9S" crossorigin="anonymous"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.css" integrity="sha384-wcIxkf4k558AjM3Yz3BBFQUbk/zgIYC2R0QpeeYb+TwlBVMrlgLqwRjRtGZiK7ww" crossorigin="anonymous">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism.min.css" integrity="sha384-rCCjoCPCsizaAAYVoz1Q0CmCTvnctK0JkfCSjx7IIxexTBg+uCKtFYycedUjMyA2" crossorigin="anonymous">
   <style>
     ${getMarkdownStyles()}
     body, html { height: 100%; }
@@ -940,9 +940,9 @@ function getOpenPage(meta) {
   const expiryText = expiresInDays === 0 ? '永不删除' : `${expiresInDays} 天后自动删除`;
 
   const markdownResources = enableMarkdown ? `
-  <script src="https://cdn.jsdelivr.net/npm/luogu-renderer@1.0.5/dist/luogu-new-renderer.iife.js"></script>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.css">
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/luogu-renderer@1.0.5/dist/luogu-new-renderer.iife.js" integrity="sha384-uvo+AtndM549/9r8QeKtZ5fKy+TjqF/ssIXqMp2Fj4LZovtfKymdOjOkVFGtoX9S" crossorigin="anonymous"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.css" integrity="sha384-wcIxkf4k558AjM3Yz3BBFQUbk/zgIYC2R0QpeeYb+TwlBVMrlgLqwRjRtGZiK7ww" crossorigin="anonymous">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism.min.css" integrity="sha384-rCCjoCPCsizaAAYVoz1Q0CmCTvnctK0JkfCSjx7IIxexTBg+uCKtFYycedUjMyA2" crossorigin="anonymous">
   ` : '';
 
   const markdownStyles = enableMarkdown ? getMarkdownStyles() : '';
@@ -958,7 +958,7 @@ function getOpenPage(meta) {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>剪贴板 - ${escapeHtml(name)}</title>
   <link rel="icon" href="data:,">
-  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
+  <script src="https://cdn.tailwindcss.com/3.4.17" integrity="sha384-igm5BeiBt36UU4gqwWS7imYmelpTsZlQ45FZf+XBn9MuJbn4nQr7yx1yFydocC/K" crossorigin="anonymous"></script>
   ${markdownResources}
   <style>
     ${markdownStyles}
