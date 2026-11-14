@@ -359,6 +359,20 @@ test('创建验证：名称冲突不会消耗令牌', async () => {
   assert.equal(env.DB.tokens.has('tk'), true); // INSERT 失败不消耗令牌，用户可重试
 });
 
+test('check-create-password：正确密码返回 200，错误返回 403', async () => {
+  const env = makeEnv({ CREATE_PASSWORD: 'true', ALLOWED_PASSWORDS: '["master"]' });
+  const ok = await callApi(env, '/api/check-create-password', { password: 'master' });
+  assert.equal(ok.status, 200);
+  const bad = await callApi(env, '/api/check-create-password', { password: 'nope' });
+  assert.equal(bad.status, 403);
+});
+
+test('未启用创建验证时 check-create-password 返回 400', async () => {
+  const env = makeEnv();
+  const res = await callApi(env, '/api/check-create-password', { password: 'x' });
+  assert.equal(res.status, 400);
+});
+
 // ---------- 测试：安全防护 ----------
 test('跨站请求（Origin 不匹配）被拒绝', async () => {
   const env = makeEnv();

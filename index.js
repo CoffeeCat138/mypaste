@@ -345,6 +345,8 @@ async function handleApiRequest(request, env, createVerificationEnabled, allowed
   switch (path) {
     case '/api/verify-create':
       return verifyCreatePassword(body, request, env, createVerificationEnabled, allowedCreatePasswords);
+    case '/api/check-create-password':
+      return checkCreatePassword(body, request, env, createVerificationEnabled, allowedCreatePasswords);
     case '/api/create':
       return createClipboard(body, request, env, createVerificationEnabled);
     case '/api/get':
@@ -393,6 +395,23 @@ async function verifyCreatePassword(body, request, env, createVerificationEnable
     200,
     { 'Set-Cookie': buildCreateTokenCookie(token, CREATE_TOKEN_TTL_MS / 1000, secure) }
   );
+}
+
+async function checkCreatePassword(body, request, env, createVerificationEnabled, allowedCreatePasswords) {
+  if (!createVerificationEnabled) {
+    return jsonResponse({ error: '未启用创建验证' }, 400);
+  }
+  const { password } = body;
+  if (typeof password !== 'string' || !password) {
+    return jsonResponse({ error: '请输入密码' }, 400);
+  }
+  if (allowedCreatePasswords.length === 0) {
+    return jsonResponse({ error: '验证配置错误' }, 500);
+  }
+  if (!allowedCreatePasswords.some((allowed) => timingSafeEqual(password, allowed))) {
+    return jsonResponse({ error: '全局创建密码错误' }, 403);
+  }
+  return jsonResponse({ success: true });
 }
 
 async function createClipboard(body, request, env, createVerificationEnabled) {
@@ -1109,14 +1128,42 @@ function getOpenPage(meta) {
         errorEl.classList.add('hidden');
         modal.classList.remove('hidden');
         input.focus();
+        let checking = false;
         function cleanup() { modal.classList.add('hidden'); }
-        confirmBtn.onclick = () => {
+        cancelBtn.onclick = () => { cleanup(); reject(new Error('取消')); };
+        confirmBtn.onclick = async () => {
+          if (checking) return;
           const pwd = input.value.trim();
           if (!pwd) { errorEl.textContent = '请输入密码'; errorEl.classList.remove('hidden'); return; }
-          cleanup();
-          resolve(pwd);
+          checking = true;
+          confirmBtn.disabled = true;
+          confirmBtn.textContent = '验证中…';
+          errorEl.classList.add('hidden');
+          try {
+            const res = await fetch('/api/check-create-password', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ password: pwd })
+            });
+            if (res.ok) {
+              cleanup();
+              resolve(pwd);
+            } else {
+              const data = await res.json().catch(() => ({}));
+              errorEl.textContent = data.error || '密码错误';
+              errorEl.classList.remove('hidden');
+              input.value = '';
+              input.focus();
+            }
+          } catch (e) {
+            errorEl.textContent = '网络错误，请检查连接';
+            errorEl.classList.remove('hidden');
+          } finally {
+            checking = false;
+            confirmBtn.disabled = false;
+            confirmBtn.textContent = '确认';
+          }
         };
-        cancelBtn.onclick = () => { cleanup(); reject(new Error('取消')); };
       });
     }
 
