@@ -512,3 +512,87 @@ test('过期剪贴板打开时回落创建页', async () => {
   assert.ok(html.includes('新建剪贴板'));
   assert.equal(env.DB.clipboards.has('expired-page'), false);
 });
+
+test('启用全局创建密码时更新需验证 createPassword', async () => {
+  const env = makeEnv({ CREATE_PASSWORD: 'true', ALLOWED_PASSWORDS: '["master"]' });
+  // 先获取令牌再创建剪贴板
+  const vr = await callApi(env, '/api/verify-create', { name: 'gp-update', password: 'master' });
+  const token = vr.headers.get('Set-Cookie').split(';')[0].split('=')[1];
+  await callApi(env, '/api/create', { name: 'gp-update', content: 'old' },
+    { headers: { Cookie: `create_token=${token}` } });
+
+  // 不带 createPassword 应被拒绝
+  const bad = await callApi(env, '/api/update', { name: 'gp-update', content: 'new' });
+  assert.equal(bad.status, 401);
+
+  // 密码错误应被拒绝
+  const wrong = await callApi(env, '/api/update', { name: 'gp-update', content: 'new', createPassword: 'nope' });
+  assert.equal(wrong.status, 403);
+
+  // 密码正确应成功
+  const ok = await callApi(env, '/api/update', { name: 'gp-update', content: 'new', createPassword: 'master' });
+  assert.equal(ok.status, 200);
+});
+
+test('启用全局创建密码时删除需验证 createPassword', async () => {
+  const env = makeEnv({ CREATE_PASSWORD: 'true', ALLOWED_PASSWORDS: '["master"]' });
+  const vr = await callApi(env, '/api/verify-create', { name: 'gp-del', password: 'master' });
+  const token = vr.headers.get('Set-Cookie').split(';')[0].split('=')[1];
+  await callApi(env, '/api/create', { name: 'gp-del', content: 'bye' },
+    { headers: { Cookie: `create_token=${token}` } });
+
+  // 不带 createPassword 应被拒绝
+  const bad = await callApi(env, '/api/delete', { name: 'gp-del' });
+  assert.equal(bad.status, 401);
+
+  // 密码正确应成功
+  const ok = await callApi(env, '/api/delete', { name: 'gp-del', createPassword: 'master' });
+  assert.equal(ok.status, 200);
+});
+
+test('未启用全局创建密码时更新/删除不需要 createPassword', async () => {
+  const env = makeEnv();
+  await createClipboard(env, 'no-gp', 'keep');
+
+  // 不传 createPassword 也能更新
+  const upd = await callApi(env, '/api/update', { name: 'no-gp', content: 'changed' });
+  assert.equal(upd.status, 200);
+
+  // 不传 createPassword 也能删除
+  const del = await callApi(env, '/api/delete', { name: 'no-gp' });
+  assert.equal(del.status, 200);
+});
+
+test('创建页为统一布局（顶部设置 + 编辑/预览分栏）', async () => {
+  const env = makeEnv();
+  const res = await getPage(env, '/create-test');
+  const html = await res.text();
+  // 顶部设置区：密码、过期、Markdown 复选框
+  assert.ok(html.includes('新建剪贴板'));
+  assert.ok(html.includes('访问密码'));
+  assert.ok(html.includes('过期时间'));
+  assert.ok(html.includes('enableMarkdown'));
+  // 编辑/预览分栏
+  assert.ok(html.includes('内容编辑'));
+  assert.ok(html.includes('实时预览'));
+  // 预览区使用了 markdown-body 样式（来自 getMarkdownStyles()）
+  assert.ok(html.includes('markdown-body') && html.includes('.copy-button'));
+  // 默认加载 luogu-renderer（创建页总是加载以便实时预览）
+  assert.ok(html.includes('luogu-renderer@1.0.5'));
+});
+
+test('打开页包含 createVerificationEnabled 信息供前端判断', async () => {
+  const env = makeEnv({ CREATE_PASSWORD: 'true', ALLOWED_PASSWORDS: '["pw"]' });
+  // 先创建并验证，以便生成剪贴板
+  const tokenRes = await callApi(env, '/api/verify-create', { name: 'cv-open', password: 'pw' });
+  const token = tokenRes.headers.get('Set-Cookie').split(';')[0].split('=')[1];
+  await callApi(env, '/api/create', { name: 'cv-open', content: 'hello' },
+    { headers: { Cookie: `create_token=${token}` } });
+
+  const res = await getPage(env, '/cv-open');
+  const html = await res.text();
+  // JS 中应内联 createVerificationEnabled: true
+  assert.ok(html.includes('const createVerificationEnabled = true'));
+  // 应包含全局密码验证对话框
+  assert.ok(html.includes('globalPasswordModal'));
+});

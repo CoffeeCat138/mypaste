@@ -297,6 +297,7 @@ export default {
       updatedAt: row.updated_at,
       expiresInDays: row.expires_in_days,
       enableMarkdown: row.enable_markdown === 1,
+      createVerificationEnabled,
       // 无密码剪贴板：内容直接内联进页面，省去一次 API 往返；有密码则必须验证后获取
       inlineContent: row.password_hash ? null : row.content
     };
@@ -349,9 +350,9 @@ async function handleApiRequest(request, env, createVerificationEnabled, allowed
     case '/api/get':
       return getClipboardContent(body, request, env);
     case '/api/update':
-      return updateClipboard(body, request, env);
+      return updateClipboard(body, request, env, createVerificationEnabled, allowedCreatePasswords);
     case '/api/delete':
-      return deleteClipboard(body, request, env);
+      return deleteClipboard(body, request, env, createVerificationEnabled, allowedCreatePasswords);
     default:
       return jsonResponse({ error: '接口不存在' }, 404);
   }
@@ -496,8 +497,8 @@ async function getClipboardContent(body, request, env) {
   });
 }
 
-async function updateClipboard(body, request, env) {
-  const { name, content, password } = body;
+async function updateClipboard(body, request, env, createVerificationEnabled, allowedCreatePasswords) {
+  const { name, content, password, createPassword } = body;
   if (!name || typeof content !== 'string') {
     return jsonResponse({ error: '参数不完整' }, 400);
   }
@@ -510,6 +511,16 @@ async function updateClipboard(body, request, env) {
 
   const row = await getExistingClipboard(env, name);
   if (!row) return jsonResponse({ error: '剪贴板不存在或已过期' }, 404);
+
+  // 如果启用了全局创建密码，编辑前必须验证
+  if (createVerificationEnabled) {
+    if (!createPassword || typeof createPassword !== 'string') {
+      return jsonResponse({ error: '需要全局创建密码' }, 401);
+    }
+    if (!allowedCreatePasswords.some((allowed) => timingSafeEqual(createPassword, allowed))) {
+      return jsonResponse({ error: '全局创建密码错误' }, 403);
+    }
+  }
 
   const auth = await checkClipboardPassword(request, row, password, name);
   if (auth === 'need_password') return jsonResponse({ error: '需要密码' }, 401);
@@ -524,12 +535,22 @@ async function updateClipboard(body, request, env) {
   return jsonResponse({ success: true });
 }
 
-async function deleteClipboard(body, request, env) {
-  const { name, password } = body;
+async function deleteClipboard(body, request, env, createVerificationEnabled, allowedCreatePasswords) {
+  const { name, password, createPassword } = body;
   if (!name) return jsonResponse({ error: '缺少剪贴板名称' }, 400);
 
   const row = await getExistingClipboard(env, name);
   if (!row) return jsonResponse({ error: '剪贴板不存在或已过期' }, 404);
+
+  // 如果启用了全局创建密码，删除前必须验证
+  if (createVerificationEnabled) {
+    if (!createPassword || typeof createPassword !== 'string') {
+      return jsonResponse({ error: '需要全局创建密码' }, 401);
+    }
+    if (!allowedCreatePasswords.some((allowed) => timingSafeEqual(createPassword, allowed))) {
+      return jsonResponse({ error: '全局创建密码错误' }, 403);
+    }
+  }
 
   const auth = await checkClipboardPassword(request, row, password, name);
   if (auth === 'need_password') return jsonResponse({ error: '需要密码' }, 401);
@@ -647,50 +668,117 @@ function getCreatePage(name) {
   <title>创建剪贴板 - ${escapeHtml(name)}</title>
   <link rel="icon" href="data:,">
   <script src="https://cdn.tailwindcss.com/3.4.17"></script>
+  <!-- 默认启用 Markdown 资源（用户可取消勾选复选框） -->
+  <script src="https://cdn.jsdelivr.net/npm/luogu-renderer@1.0.5/dist/luogu-new-renderer.iife.js"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism.min.css">
+  <style>
+    ${getMarkdownStyles()}
+    body, html { height: 100%; }
+    .app-container { min-height: 100vh; display: flex; flex-direction: column; }
+    .content-area { flex: 1; overflow-y: auto; }
+    .edit-container > div { min-width: 0; }
+    @media (max-width: 768px) {
+      .edit-container { flex-direction: column; }
+    }
+    #preview { overflow-wrap: break-word; word-wrap: break-word; }
+  </style>
 </head>
-<body class="bg-gray-50 min-h-screen py-12">
-  <div class="max-w-2xl mx-auto bg-white rounded-xl shadow p-8">
-    <h1 class="text-3xl font-bold mb-2">新建剪贴板</h1>
-    <p class="text-gray-600 mb-6">名称：<strong>${escapeHtml(name)}</strong></p>
-    <form id="createForm">
-      <div class="mb-4">
-        <label class="block text-sm font-medium text-gray-700 mb-1">内容</label>
-        <textarea id="content" required class="w-full h-48 border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-transparent" placeholder="粘贴或输入文本..."></textarea>
+<body class="bg-gray-50">
+  <div class="app-container">
+    <!-- 顶部栏：名称 + 设置项 -->
+    <div class="bg-white border-b border-gray-200 px-4 py-3 shadow-sm">
+      <div class="max-w-6xl mx-auto">
+        <h1 class="text-xl font-bold mb-3">📝 新建剪贴板：${escapeHtml(name)}</h1>
+        <div class="flex flex-wrap items-center gap-4">
+          <div class="flex items-center gap-2">
+            <label class="text-sm text-gray-600 whitespace-nowrap">访问密码</label>
+            <input type="password" id="password" class="border border-gray-300 rounded-lg px-3 py-1.5 text-sm w-32 focus:ring-2 focus:ring-blue-500" placeholder="可选">
+          </div>
+          <div class="flex items-center gap-2">
+            <label class="text-sm text-gray-600 whitespace-nowrap">过期时间</label>
+            <select id="expiresInDays" class="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:ring-2 focus:ring-blue-500">
+              <option value="0">永不删除</option>
+              <option value="1">1 天</option>
+              <option value="3" selected>3 天</option>
+              <option value="7">7 天</option>
+              <option value="14">14 天</option>
+              <option value="30">30 天</option>
+            </select>
+          </div>
+          <label class="flex items-center gap-1.5 cursor-pointer">
+            <input type="checkbox" id="enableMarkdown" checked class="h-4 w-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500">
+            <span class="text-sm text-gray-600">Markdown</span>
+          </label>
+        </div>
       </div>
-      <div class="mb-4 flex items-center">
-        <input type="checkbox" id="enableMarkdown" checked class="h-4 w-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500">
-        <label for="enableMarkdown" class="ml-2 block text-sm text-gray-700">启用 Markdown 渲染（支持 LaTeX、代码高亮等）</label>
+    </div>
+
+    <!-- 编辑区 + 实时预览分栏 -->
+    <div class="content-area p-6">
+      <div class="edit-container flex gap-4 max-w-6xl mx-auto">
+        <div class="flex-1">
+          <label class="block text-sm font-medium text-gray-700 mb-1">内容编辑</label>
+          <textarea id="content" required class="w-full h-[70vh] border border-gray-300 rounded-lg px-3 py-2 font-mono text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none" placeholder="粘贴或输入文本..."></textarea>
+        </div>
+        <div class="flex-1">
+          <label class="block text-sm font-medium text-gray-700 mb-1">实时预览</label>
+          <div id="preview" class="bg-white rounded-xl shadow p-4 h-[70vh] overflow-y-auto markdown-body"></div>
+        </div>
       </div>
-      <div class="mb-4">
-        <label class="block text-sm font-medium text-gray-700 mb-1">访问密码（可选）</label>
-        <input type="password" id="password" class="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-transparent" placeholder="留空表示无密码">
+      <div class="mt-4 max-w-6xl mx-auto">
+        <button id="createBtn" class="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2.5 rounded-lg text-sm font-medium transition">创建剪贴板</button>
+        <p id="error" class="text-red-500 mt-3"></p>
       </div>
-      <div class="mb-6">
-        <label class="block text-sm font-medium text-gray-700 mb-1">自动删除时长</label>
-        <select id="expiresInDays" class="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-transparent">
-          <option value="0">永不删除</option>
-          <option value="1">1 天</option>
-          <option value="3" selected>3 天</option>
-          <option value="7">7 天</option>
-          <option value="14">14 天</option>
-          <option value="30">30 天</option>
-        </select>
-      </div>
-      <button type="submit" class="w-full bg-blue-600 text-white py-2 rounded-lg hover:bg-blue-700 transition">创建剪贴板</button>
-      <div class="error text-red-500 mt-3" id="error"></div>
-    </form>
+    </div>
   </div>
+
   <script>
     const name = ${safeJsonStringify(name)};
+    let renderAvailable = true;
+    let renderer = null;
+    if (typeof window.LuoguNewRenderer !== 'undefined' &&
+        typeof window.LuoguNewRenderer.render === 'function') {
+      renderer = window.LuoguNewRenderer;
+    } else {
+      renderAvailable = false;
+    }
 
-    document.getElementById('createForm').addEventListener('submit', async (e) => {
-      e.preventDefault();
+    let renderSeq = 0;
+    async function updatePreview() {
+      const text = document.getElementById('content').value;
+      const preview = document.getElementById('preview');
+      const enableMd = document.getElementById('enableMarkdown').checked;
+      if (!enableMd || !renderAvailable || !renderer) {
+        preview.textContent = text;
+        return;
+      }
+      const seq = ++renderSeq;
+      try {
+        const html = await renderer.render(text);
+        if (seq !== renderSeq) return;
+        preview.innerHTML = html;
+      } catch (e) {
+        if (seq !== renderSeq) return;
+        renderAvailable = false;
+        preview.textContent = text;
+      }
+    }
+
+    document.getElementById('content').addEventListener('input', updatePreview);
+    document.getElementById('enableMarkdown').addEventListener('change', updatePreview);
+
+    document.getElementById('createBtn').addEventListener('click', async () => {
       const errorEl = document.getElementById('error');
       errorEl.textContent = '';
       const content = document.getElementById('content').value;
       const password = document.getElementById('password').value;
       const expiresInDays = parseInt(document.getElementById('expiresInDays').value);
       const enableMarkdown = document.getElementById('enableMarkdown').checked;
+      if (!content || content.trim() === '') {
+        errorEl.textContent = '内容不能为空';
+        return;
+      }
       if (content.length > 102400) {
         errorEl.textContent = '内容过长（最多 100KB）';
         return;
@@ -716,17 +804,9 @@ function getCreatePage(name) {
 </html>`;
 }
 
-function getOpenPage(meta) {
-  const { name, hasPassword, createdAt, updatedAt, expiresInDays, enableMarkdown, inlineContent } = meta;
-  const expiryText = expiresInDays === 0 ? '永不删除' : `${expiresInDays} 天后自动删除`;
-
-  const markdownResources = enableMarkdown ? `
-  <script src="https://cdn.jsdelivr.net/npm/luogu-renderer@1.0.5/dist/luogu-new-renderer.iife.js"></script>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.css">
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism.min.css">
-  ` : '';
-
-  const markdownStyles = enableMarkdown ? `
+// 共享 Markdown 样式（同时用于打开页和创建页的预览）
+function getMarkdownStyles() {
+  return `
     .markdown-body { line-height: 1.6; word-break: break-word; }
     .katex { font-size: 1.1em; }
 
@@ -794,7 +874,20 @@ function getOpenPage(meta) {
 
     /* 题头 epigraph */
     .markdown-body .epigraph { border-left: 4px solid #e5e7eb; padding-left: 1em; color: #6b7280; margin: 0.75em 0; }
+  `;
+}
+
+function getOpenPage(meta) {
+  const { name, hasPassword, createdAt, updatedAt, expiresInDays, enableMarkdown, inlineContent, createVerificationEnabled } = meta;
+  const expiryText = expiresInDays === 0 ? '永不删除' : `${expiresInDays} 天后自动删除`;
+
+  const markdownResources = enableMarkdown ? `
+  <script src="https://cdn.jsdelivr.net/npm/luogu-renderer@1.0.5/dist/luogu-new-renderer.iife.js"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism.min.css">
   ` : '';
+
+  const markdownStyles = enableMarkdown ? getMarkdownStyles() : '';
 
   const inlineContentJs = inlineContent === null || inlineContent === undefined
     ? 'null'
@@ -879,11 +972,13 @@ function getOpenPage(meta) {
     const enableMarkdown = ${enableMarkdown};
     const inlineContent = ${inlineContentJs};
     const createdAt = ${createdAt};
+    const createVerificationEnabled = ${createVerificationEnabled};
     // 显示创建时间：跟随查看者系统时区，并附带时区标识（如 GMT+8）；
     // 服务端预渲染的 UTC 文本仅作为 JS 被禁用时的回退
     document.getElementById('createdAtDisplay').textContent =
       new Date(createdAt).toLocaleString(undefined, { timeZoneName: 'short' });
     let currentPassword = '';
+    let globalPassword = '';
     let originalContent = '';
     let renderAvailable = enableMarkdown;
 
@@ -938,6 +1033,29 @@ function getOpenPage(meta) {
       updateEditPreview();
       document.getElementById('previewMode').classList.add('hidden');
       document.getElementById('editMode').classList.remove('hidden');
+    }
+
+    // 全局创建密码验证（返回 Promise，确认则 resolve，取消则 reject）
+    function promptGlobalPassword() {
+      return new Promise((resolve, reject) => {
+        const modal = document.getElementById('globalPasswordModal');
+        const input = document.getElementById('globalPasswordInput');
+        const errorEl = document.getElementById('globalPasswordError');
+        const confirmBtn = document.getElementById('globalPasswordConfirm');
+        const cancelBtn = document.getElementById('globalPasswordCancel');
+        input.value = '';
+        errorEl.classList.add('hidden');
+        modal.classList.remove('hidden');
+        input.focus();
+        function cleanup() { modal.classList.add('hidden'); }
+        confirmBtn.onclick = () => {
+          const pwd = input.value.trim();
+          if (!pwd) { errorEl.textContent = '请输入密码'; errorEl.classList.remove('hidden'); return; }
+          cleanup();
+          resolve(pwd);
+        };
+        cancelBtn.onclick = () => { cleanup(); reject(new Error('取消')); };
+      });
     }
 
     function updateEditPreview() {
@@ -1009,7 +1127,12 @@ function getOpenPage(meta) {
     });
 
     document.getElementById('copyBtn').addEventListener('click', copyContent);
-    document.getElementById('editBtn').addEventListener('click', showEditor);
+    document.getElementById('editBtn').addEventListener('click', async () => {
+      if (createVerificationEnabled) {
+        try { globalPassword = await promptGlobalPassword(); } catch (e) { return; }
+      }
+      showEditor();
+    });
     document.getElementById('editContent').addEventListener('input', updateEditPreview);
     document.getElementById('cancelBtn').addEventListener('click', showPreview);
 
@@ -1023,7 +1146,7 @@ function getOpenPage(meta) {
         const res = await fetch('/api/update', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name, content, password: currentPassword })
+          body: JSON.stringify({ name, content, password: currentPassword, createPassword: globalPassword })
         });
         const data = await parseJson(res);
         if (res.ok) {
@@ -1040,12 +1163,15 @@ function getOpenPage(meta) {
     });
 
     document.getElementById('deleteBtn').addEventListener('click', async () => {
+      if (createVerificationEnabled) {
+        try { globalPassword = await promptGlobalPassword(); } catch (e) { return; }
+      }
       if (!confirm('确定要删除这个剪贴板吗？此操作不可撤销。')) return;
       try {
         const res = await fetch('/api/delete', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name, password: currentPassword })
+          body: JSON.stringify({ name, password: currentPassword, createPassword: globalPassword })
         });
         const data = await parseJson(res);
         if (res.ok) {
@@ -1089,6 +1215,17 @@ function getOpenPage(meta) {
       }
     }
   </script>
-</body>
+    <div id="globalPasswordModal" class="hidden fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+      <div class="bg-white rounded-xl shadow-2xl p-6 w-full max-w-sm mx-4">
+        <h3 class="text-lg font-semibold mb-4">需要全局创建密码</h3>
+        <input type="password" id="globalPasswordInput" class="w-full border border-gray-300 rounded-lg px-3 py-2 mb-4 focus:ring-2 focus:ring-blue-500" placeholder="请输入全局密码">
+        <p id="globalPasswordError" class="text-red-500 text-sm mb-4 hidden"></p>
+        <div class="flex space-x-2 justify-end">
+          <button id="globalPasswordCancel" class="bg-gray-200 hover:bg-gray-300 text-gray-800 px-4 py-2 rounded-lg text-sm">取消</button>
+          <button id="globalPasswordConfirm" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm">确认</button>
+        </div>
+      </div>
+    </div>
+  </body>
 </html>`;
 }
