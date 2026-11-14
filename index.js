@@ -1009,6 +1009,10 @@ function getOpenPage(meta) {
               <div class="flex items-center gap-2">
                 <label class="text-sm text-gray-600 whitespace-nowrap">修改访问密码</label>
                 <input type="password" id="editPassword" class="border border-gray-300 rounded-lg px-3 py-1.5 text-sm w-32 focus:ring-2 focus:ring-blue-500" placeholder="留空不变">
+                <label class="flex items-center gap-1 text-sm text-red-500 cursor-pointer select-none">
+                  <input type="checkbox" id="editClearPassword" class="h-3.5 w-3.5 accent-red-500">
+                  清除密码
+                </label>
               </div>
               <div class="flex items-center gap-2">
                 <label class="text-sm text-gray-600 whitespace-nowrap">过期时间</label>
@@ -1110,6 +1114,7 @@ function getOpenPage(meta) {
       }
       sel.value = expiresInDays;
       document.getElementById('editPassword').value = '';
+      document.getElementById('editClearPassword').checked = false;
       document.getElementById('editContent').value = originalContent;
       updateEditPreview();
       document.getElementById('previewMode').classList.add('hidden');
@@ -1252,13 +1257,22 @@ function getOpenPage(meta) {
         return;
       }
       const newPassword = document.getElementById('editPassword').value;
+      const clearPassword = document.getElementById('editClearPassword').checked;
       const editExpiresInDays = parseInt(document.getElementById('editExpiresInDays').value, 10);
       document.getElementById('editError').textContent = '';
+
+      function buildBody() {
+        const b = { name, content, password: currentPassword, createPassword: globalPassword, expiresInDays: editExpiresInDays };
+        if (clearPassword) { b.newPassword = ''; }
+        else if (newPassword) { b.newPassword = newPassword; }
+        return b;
+      }
+
       try {
         let res = await fetch('/api/update', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name, content, password: currentPassword, createPassword: globalPassword, newPassword, expiresInDays: editExpiresInDays })
+          body: JSON.stringify(buildBody())
         });
         let data = await parseJson(res);
         // 全局密码错误 → 重新弹出密码框，不离开编辑页
@@ -1268,7 +1282,7 @@ function getOpenPage(meta) {
           res = await fetch('/api/update', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name, content, password: currentPassword, createPassword: globalPassword, newPassword, expiresInDays: editExpiresInDays })
+            body: JSON.stringify(buildBody())
           });
           data = await parseJson(res);
         }

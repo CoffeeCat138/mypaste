@@ -66,11 +66,18 @@ class MockDb {
       return { success: true, meta: { changes } };
     }
     if (sql.startsWith('UPDATE clipboards')) {
-      const [content, updated_at, name] = args;
+      // 动态解析 SET 子句中的字段名，支持任意字段组合（content/updated_at/expires_in_days/expires_at/password_hash）
+      const match = sql.match(/^UPDATE clipboards SET ([\s\S]+?) WHERE/);
+      if (!match) throw new Error('MockDb: cannot parse UPDATE SET clause');
+      const setExprs = match[1].split(',');
+      const fields = setExprs.map(s => s.trim().split(' ')[0].trim());
+      // 最后一个是 name
+      const name = args[args.length - 1];
       const row = this.clipboards.get(name);
       if (!row) return { success: true, meta: { changes: 0 } };
-      row.content = content;
-      row.updated_at = updated_at;
+      for (let i = 0; i < fields.length; i++) {
+        row[fields[i]] = args[i];
+      }
       return { success: true, meta: { changes: 1 } };
     }
     throw new Error('MockDb: unexpected SQL in run(): ' + sql);
@@ -575,6 +582,36 @@ test('未启用全局创建密码时更新/删除不需要 createPassword', asyn
   // 不传 createPassword 也能删除
   const del = await callApi(env, '/api/delete', { name: 'no-gp' });
   assert.equal(del.status, 200);
+});
+
+test('修改过期时间：从指定天数改为永不删除、再改回指定天数', async () => {
+  const env = makeEnv();
+  await createClipboard(env, 'expiry-test', 'data', { expiresInDays: 7 });
+  // 验证初始状态
+  const db = await env.DB.prepare('SELECT expires_in_days, expires_at FROM clipboards WHERE name = ?').bind('expiry-test').first();
+  assert.equal(db.expires_in_days, 7);
+  assert.ok(db.expires_at > Date.now());
+
+  // 更新为3天
+  const upd1 = await callApi(env, '/api/update', { name: 'expiry-test', content: 'data2', expiresInDays: 3 });
+  assert.equal(upd1.status, 200);
+  const after3 = await env.DB.prepare('SELECT expires_in_days, expires_at FROM clipboards WHERE name = ?').bind('expiry-test').first();
+  assert.equal(after3.expires_in_days, 3);
+  assert.ok(after3.expires_at > Date.now());
+
+  // 更新为永不删除
+  const upd2 = await callApi(env, '/api/update', { name: 'expiry-test', content: 'data3', expiresInDays: 0 });
+  assert.equal(upd2.status, 200);
+  const after0 = await env.DB.prepare('SELECT expires_in_days, expires_at FROM clipboards WHERE name = ?').bind('expiry-test').first();
+  assert.equal(after0.expires_in_days, 0);
+  assert.equal(after0.expires_at, null);
+
+  // 再从永不删除改回7天
+  const upd3 = await callApi(env, '/api/update', { name: 'expiry-test', content: 'data4', expiresInDays: 7 });
+  assert.equal(upd3.status, 200);
+  const after7 = await env.DB.prepare('SELECT expires_in_days, expires_at FROM clipboards WHERE name = ?').bind('expiry-test').first();
+  assert.equal(after7.expires_in_days, 7);
+  assert.ok(after7.expires_at > Date.now());
 });
 
 test('创建页为统一布局（顶部设置 + 编辑/预览分栏）', async () => {
