@@ -498,7 +498,7 @@ async function getClipboardContent(body, request, env) {
 }
 
 async function updateClipboard(body, request, env, createVerificationEnabled, allowedCreatePasswords) {
-  const { name, content, password, createPassword } = body;
+  const { name, content, password, createPassword, expiresInDays, newPassword } = body;
   if (!name || typeof content !== 'string') {
     return jsonResponse({ error: '参数不完整' }, 400);
   }
@@ -527,10 +527,49 @@ async function updateClipboard(body, request, env, createVerificationEnabled, al
   if (auth === 'wrong_password') return jsonResponse({ error: '密码错误' }, 403);
   if (auth === 'rate_limited') return jsonResponse({ error: '尝试次数过多，请稍后再试' }, 429);
 
+  // 处理过期时间变更
+  let newDays = null;
+  let newExpiresAt = null;
+  if (expiresInDays !== undefined) {
+    newDays = getValidExpiration(expiresInDays);
+    if (newDays === null) {
+      return jsonResponse({ error: '无效的过期天数' }, 400);
+    }
+    newExpiresAt = newDays > 0 ? Date.now() + daysToMillis(newDays) : null;
+  }
+
+  // 处理访问密码变更：空字符串表示清除密码
+  let newPasswordHash = undefined; // undefined = 不修改；null = 清除密码
+  if (newPassword !== undefined) {
+    if (typeof newPassword !== 'string') {
+      return jsonResponse({ error: '参数格式错误' }, 400);
+    }
+    if (newPassword.trim() !== '') {
+      newPasswordHash = await hashPassword(newPassword, env);
+    } else {
+      newPasswordHash = null;
+    }
+  }
+
   const now = Date.now();
+  // 构建动态 SQL
+  const sets = ['content = ?', 'updated_at = ?'];
+  const params = [content, now];
+  if (newDays !== null) {
+    sets.push('expires_in_days = ?');
+    params.push(newDays);
+    sets.push('expires_at = ?');
+    params.push(newExpiresAt);
+  }
+  if (newPasswordHash !== undefined) {
+    sets.push('password_hash = ?');
+    params.push(newPasswordHash);
+  }
+  params.push(name);
+
   await env.DB.prepare(
-    'UPDATE clipboards SET content = ?, updated_at = ? WHERE name = ?'
-  ).bind(content, now, name).run();
+    `UPDATE clipboards SET ${sets.join(', ')} WHERE name = ?`
+  ).bind(...params).run();
 
   return jsonResponse({ success: true });
 }
@@ -946,6 +985,18 @@ function getOpenPage(meta) {
           <div id="contentDisplay" class="bg-white rounded-xl shadow p-6 max-w-4xl mx-auto ${enableMarkdown ? 'markdown-body' : 'whitespace-pre-wrap'}"></div>
         </div>
         <div id="editMode" class="hidden">
+          <div class="edit-settings bg-gray-100 rounded-lg px-4 py-3 mb-4 max-w-6xl mx-auto">
+            <div class="flex flex-wrap items-center gap-4">
+              <div class="flex items-center gap-2">
+                <label class="text-sm text-gray-600 whitespace-nowrap">修改访问密码</label>
+                <input type="password" id="editPassword" class="border border-gray-300 rounded-lg px-3 py-1.5 text-sm w-32 focus:ring-2 focus:ring-blue-500" placeholder="留空不变">
+              </div>
+              <div class="flex items-center gap-2">
+                <label class="text-sm text-gray-600 whitespace-nowrap">过期时间</label>
+                <select id="editExpiresInDays" class="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:ring-2 focus:ring-blue-500"></select>
+              </div>
+            </div>
+          </div>
           <div class="edit-container flex gap-4 max-w-6xl mx-auto">
             <div class="flex-1">
               <label class="block text-sm font-medium mb-1">编辑内容</label>
@@ -973,6 +1024,7 @@ function getOpenPage(meta) {
     const inlineContent = ${inlineContentJs};
     const createdAt = ${createdAt};
     const createVerificationEnabled = ${createVerificationEnabled};
+    const expiresInDays = ${expiresInDays};
     // 显示创建时间：跟随查看者系统时区，并附带时区标识（如 GMT+8）；
     // 服务端预渲染的 UTC 文本仅作为 JS 被禁用时的回退
     document.getElementById('createdAtDisplay').textContent =
@@ -1029,6 +1081,16 @@ function getOpenPage(meta) {
     }
 
     function showEditor() {
+      // 初始化过期时间下拉框（仅在首次编辑时填充选项）
+      const sel = document.getElementById('editExpiresInDays');
+      if (sel.options.length === 0) {
+        const opts = [
+          [0, '永不删除'], [1, '1 天'], [3, '3 天'], [7, '7 天'], [14, '14 天'], [30, '30 天']
+        ];
+        opts.forEach(([v, t]) => { const o = document.createElement('option'); o.value = v; o.textContent = t; sel.appendChild(o); });
+      }
+      sel.value = expiresInDays;
+      document.getElementById('editPassword').value = '';
       document.getElementById('editContent').value = originalContent;
       updateEditPreview();
       document.getElementById('previewMode').classList.add('hidden');
@@ -1142,11 +1204,13 @@ function getOpenPage(meta) {
         document.getElementById('editError').textContent = '内容过长（最多 100KB）';
         return;
       }
+      const newPassword = document.getElementById('editPassword').value;
+      const editExpiresInDays = parseInt(document.getElementById('editExpiresInDays').value, 10);
       try {
         const res = await fetch('/api/update', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name, content, password: currentPassword, createPassword: globalPassword })
+          body: JSON.stringify({ name, content, password: currentPassword, createPassword: globalPassword, newPassword, expiresInDays: editExpiresInDays })
         });
         const data = await parseJson(res);
         if (res.ok) {
@@ -1154,10 +1218,6 @@ function getOpenPage(meta) {
           showPreview();
         } else {
           document.getElementById('editError').textContent = data.error || '更新失败';
-          if (res.status === 401 || res.status === 403) {
-            document.getElementById('passwordSection').classList.remove('hidden');
-            document.getElementById('contentSection').classList.add('hidden');
-          }
         }
       } catch (err) { document.getElementById('editError').textContent = '网络错误，请检查连接'; }
     });
@@ -1178,10 +1238,6 @@ function getOpenPage(meta) {
           window.location.href = '/';
         } else {
           alert(data.error || '删除失败');
-          if (res.status === 401 || res.status === 403) {
-            document.getElementById('passwordSection').classList.remove('hidden');
-            document.getElementById('contentSection').classList.add('hidden');
-          }
         }
       } catch (err) { alert('网络错误，请检查连接'); }
     });
