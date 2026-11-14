@@ -1206,13 +1206,25 @@ function getOpenPage(meta) {
       }
       const newPassword = document.getElementById('editPassword').value;
       const editExpiresInDays = parseInt(document.getElementById('editExpiresInDays').value, 10);
+      document.getElementById('editError').textContent = '';
       try {
-        const res = await fetch('/api/update', {
+        let res = await fetch('/api/update', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ name, content, password: currentPassword, createPassword: globalPassword, newPassword, expiresInDays: editExpiresInDays })
         });
-        const data = await parseJson(res);
+        let data = await parseJson(res);
+        // 全局密码错误 → 重新弹出密码框，不离开编辑页
+        while ((res.status === 401 || res.status === 403) && createVerificationEnabled && data.error && data.error.includes('全局创建密码')) {
+          try { globalPassword = await promptGlobalPassword(); } catch (e) { return; }
+          document.getElementById('editError').textContent = '';
+          res = await fetch('/api/update', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, content, password: currentPassword, createPassword: globalPassword, newPassword, expiresInDays: editExpiresInDays })
+          });
+          data = await parseJson(res);
+        }
         if (res.ok) {
           originalContent = content;
           showPreview();
@@ -1228,12 +1240,23 @@ function getOpenPage(meta) {
       }
       if (!confirm('确定要删除这个剪贴板吗？此操作不可撤销。')) return;
       try {
-        const res = await fetch('/api/delete', {
+        let res = await fetch('/api/delete', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ name, password: currentPassword, createPassword: globalPassword })
         });
-        const data = await parseJson(res);
+        let data = await parseJson(res);
+        // 全局密码错误 → 重新弹出密码框确认后重试
+        while ((res.status === 401 || res.status === 403) && createVerificationEnabled && data.error && data.error.includes('全局创建密码')) {
+          try { globalPassword = await promptGlobalPassword(); } catch (e) { return; }
+          if (!confirm('确定要删除这个剪贴板吗？此操作不可撤销。')) return;
+          res = await fetch('/api/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, password: currentPassword, createPassword: globalPassword })
+          });
+          data = await parseJson(res);
+        }
         if (res.ok) {
           window.location.href = '/';
         } else {
