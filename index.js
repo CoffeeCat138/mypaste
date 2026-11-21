@@ -145,8 +145,9 @@ function isValidClipboardName(name) {
   if (typeof name !== 'string') return false;
   if (name.length === 0 || name.length > MAX_NAME_LENGTH) return false;
   if (name !== name.trim()) return false;
-  // 禁止空白、斜杠、反斜杠和控制字符（含 / 的名称创建后永远无法通过 URL 打开）
-  if (/[/\\\s\u0000-\u001f\u007f]/.test(name)) return false;
+  // 禁止空白、斜杠、反斜杠、URI 保留字符和控制字符
+  // （含 / ? # % & + 的名称会导致创建后无法通过浏览器 URL 正常打开或引发歧义）
+  if (/[/\\?#%&+\s\u0000-\u001f\u007f]/.test(name)) return false;
   return true;
 }
 
@@ -215,7 +216,10 @@ function htmlResponse(html, status = 200) {
     status,
     headers: {
       'Content-Type': 'text/html; charset=utf-8',
-      'Cache-Control': 'no-store'
+      'Cache-Control': 'no-store',
+      'X-Content-Type-Options': 'nosniff',
+      'X-Frame-Options': 'DENY',
+      'Referrer-Policy': 'strict-origin-when-cross-origin'
     }
   });
 }
@@ -405,6 +409,10 @@ async function checkCreatePassword(body, request, env, createVerificationEnabled
   if (typeof password !== 'string' || !password) {
     return jsonResponse({ error: '请输入密码' }, 400);
   }
+  // 暴力破解防护：与 verify-create 共用同一个限速桶（共用窗口内 10 次上限）
+  if (isRateLimited(getClientIp(request), 'verify-create', RATE_LIMITS.verifyCreate)) {
+    return jsonResponse({ error: '尝试次数过多，请稍后再试' }, 429);
+  }
   if (allowedCreatePasswords.length === 0) {
     return jsonResponse({ error: '验证配置错误' }, 500);
   }
@@ -418,7 +426,7 @@ async function createClipboard(body, request, env, createVerificationEnabled) {
   const { name, content, password, expiresInDays, enableMarkdown } = body;
 
   if (!isValidClipboardName(name)) {
-    return jsonResponse({ error: '剪贴板名称无效（1-64 个字符，不能包含空格或斜杠）' }, 400);
+    return jsonResponse({ error: '剪贴板名称无效（1-64 个字符，不能包含空格、斜杠或特殊符号 ?#%&+）' }, 400);
   }
   if (typeof content !== 'string' || content.trim() === '') {
     return jsonResponse({ error: '内容不能为空' }, 400);
@@ -730,6 +738,7 @@ function getCreatePage(name) {
   <script src="https://cdn.jsdelivr.net/npm/luogu-renderer@1.0.5/dist/luogu-new-renderer.iife.js" integrity="sha384-uvo+AtndM549/9r8QeKtZ5fKy+TjqF/ssIXqMp2Fj4LZovtfKymdOjOkVFGtoX9S" crossorigin="anonymous"></script>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.css" integrity="sha384-wcIxkf4k558AjM3Yz3BBFQUbk/zgIYC2R0QpeeYb+TwlBVMrlgLqwRjRtGZiK7ww" crossorigin="anonymous">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism.min.css" integrity="sha384-rCCjoCPCsizaAAYVoz1Q0CmCTvnctK0JkfCSjx7IIxexTBg+uCKtFYycedUjMyA2" crossorigin="anonymous">
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.4/dist/purify.min.js"></script>
   <style>
     ${getMarkdownStyles()}
     body, html { height: 100%; }
@@ -815,7 +824,7 @@ function getCreatePage(name) {
       try {
         const html = await renderer.render(text);
         if (seq !== renderSeq) return;
-        preview.innerHTML = html;
+        preview.innerHTML = window.DOMPurify ? window.DOMPurify.sanitize(html) : html;
       } catch (e) {
         if (seq !== renderSeq) return;
         renderAvailable = false;
@@ -943,6 +952,7 @@ function getOpenPage(meta) {
   <script src="https://cdn.jsdelivr.net/npm/luogu-renderer@1.0.5/dist/luogu-new-renderer.iife.js" integrity="sha384-uvo+AtndM549/9r8QeKtZ5fKy+TjqF/ssIXqMp2Fj4LZovtfKymdOjOkVFGtoX9S" crossorigin="anonymous"></script>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.css" integrity="sha384-wcIxkf4k558AjM3Yz3BBFQUbk/zgIYC2R0QpeeYb+TwlBVMrlgLqwRjRtGZiK7ww" crossorigin="anonymous">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism.min.css" integrity="sha384-rCCjoCPCsizaAAYVoz1Q0CmCTvnctK0JkfCSjx7IIxexTBg+uCKtFYycedUjMyA2" crossorigin="anonymous">
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.4/dist/purify.min.js"></script>
   ` : '';
 
   const markdownStyles = enableMarkdown ? getMarkdownStyles() : '';
@@ -1086,7 +1096,7 @@ function getOpenPage(meta) {
         const rendered = await renderMarkdown(text);
         if (seq !== renderSeq) return; // 已有更新的渲染请求，丢弃本次结果
         if (rendered !== null) {
-          container.innerHTML = rendered;
+          container.innerHTML = window.DOMPurify ? window.DOMPurify.sanitize(rendered) : rendered;
         } else {
           container.textContent = text;
           if (!renderAvailable) showWarning('⚠️ Markdown 渲染器加载失败，已显示原始文本。');
