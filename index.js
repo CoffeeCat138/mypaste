@@ -21,6 +21,35 @@ const RATE_LIMITS = {
 const CLIPBOARD_COLUMNS =
   'name, content, password_hash, created_at, updated_at, expires_in_days, expires_at, enable_markdown';
 
+// ---------- 阿里云内容安全审核配置（开关、密钥与参数在 Workers 环境变量 / Secrets 中配置）----------
+const ALIYUN_MODERATION_API_VERSION = '2022-03-02';
+const DEFAULT_ALIYUN_MODERATION_ENDPOINT = 'green-cip.cn-shanghai.aliyuncs.com';
+const DEFAULT_ALIYUN_MODERATION_SERVICE = 'ugc_moderation_byllm';
+const DEFAULT_ALIYUN_MODERATION_ACTION = 'TextModerationPlus';
+const ALIYUN_MODERATION_DEFAULT_CHUNK_SIZE = 600; // 普通文本审核服务单次上限 600 字
+const ALIYUN_MODERATION_LLM_CHUNK_SIZE = 2000;    // ugc_moderation_byllm 系列单次上限 2000 字
+const ALIYUN_MODERATION_TIMEOUT_MS = 10000;
+
+// 常见风险标签的中文说明映射（未命中时回退显示原始标签）
+const ALIYUN_LABEL_MAP = {
+  sexual_content: '色情低俗内容',
+  porn: '色情内容',
+  ad: '垃圾广告',
+  ad_compliance: '广告法违规',
+  political_content: '涉政敏感内容',
+  violent_content: '暴恐违禁内容',
+  violence: '暴力内容',
+  contraband: '违禁品信息',
+  profanity: '辱骂/低俗用语',
+  abuse: '辱骂内容',
+  fraud: '诈骗信息',
+  spam: '垃圾灌水',
+  minor_safety: '未成年人保护相关风险',
+  religion: '宗教敏感内容',
+  customized: '命中自定义敏感词库',
+  unmarked_url: '风险链接'
+};
+
 // ---------- 内存限速（按 IP，Worker isolate 级别）----------
 const rateLimitStore = new Map();
 
@@ -420,6 +449,231 @@ async function checkClipboardPassword(request, row, password, name) {
   return 'ok';
 }
 
+// ---------- 阿里云内容安全审核（Green 2022-03-02，ACS3-HMAC-SHA256）----------
+// Workers 环境变量 / Secrets：
+// - ALIYUN_MODERATION_ENABLED：设为 "true" 启用审核（默认关闭）
+// - ALIYUN_ACCESS_KEY_ID：阿里云 AccessKey ID（建议配为 Secret）
+// - ALIYUN_ACCESS_KEY_SECRET：阿里云 AccessKey Secret（建议配为 Secret）
+// - ALIYUN_MODERATION_ENDPOINT：接入地址（默认 green-cip.cn-shanghai.aliyuncs.com）
+// - ALIYUN_MODERATION_SERVICE：审核服务代码（默认 ugc_moderation_byllm，如 ugc_moderation_byllm_pro / comment_detection_pro 等）
+// - ALIYUN_MODERATION_ACTION：接口名（默认 TextModerationPlus，兼容 TextModeration）
+// - ALIYUN_MODERATION_FAIL_OPEN：设为 "true" 时审核服务异常放行，默认 "false"（失败拦截）
+function getAliyunModerationConfig(env) {
+  const enabled = env.ALIYUN_MODERATION_ENABLED === 'true';
+  const accessKeyId = typeof env.ALIYUN_ACCESS_KEY_ID === 'string' ? env.ALIYUN_ACCESS_KEY_ID.trim() : '';
+  const accessKeySecret = typeof env.ALIYUN_ACCESS_KEY_SECRET === 'string' ? env.ALIYUN_ACCESS_KEY_SECRET.trim() : '';
+
+  let endpoint = (typeof env.ALIYUN_MODERATION_ENDPOINT === 'string' && env.ALIYUN_MODERATION_ENDPOINT.trim())
+    ? env.ALIYUN_MODERATION_ENDPOINT.trim()
+    : DEFAULT_ALIYUN_MODERATION_ENDPOINT;
+  // 容错：去掉可能误填的协议头和尾部斜杠
+  endpoint = endpoint.replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+
+  const service = (typeof env.ALIYUN_MODERATION_SERVICE === 'string' && env.ALIYUN_MODERATION_SERVICE.trim())
+    ? env.ALIYUN_MODERATION_SERVICE.trim()
+    : DEFAULT_ALIYUN_MODERATION_SERVICE;
+
+  const action = (typeof env.ALIYUN_MODERATION_ACTION === 'string' && env.ALIYUN_MODERATION_ACTION.trim())
+    ? env.ALIYUN_MODERATION_ACTION.trim()
+    : DEFAULT_ALIYUN_MODERATION_ACTION;
+
+  const failOpen = env.ALIYUN_MODERATION_FAIL_OPEN === 'true';
+
+  return { enabled, accessKeyId, accessKeySecret, endpoint, service, action, failOpen };
+}
+
+async function sha256Hex(text) {
+  const data = new TextEncoder().encode(text);
+  const digest = await crypto.subtle.digest('SHA-256', data);
+  return toHex(new Uint8Array(digest));
+}
+
+async function hmacSha256Hex(secret, message) {
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+  const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(message));
+  return toHex(new Uint8Array(sig));
+}
+
+function formatAliyunReason(labelsStr, reasonRaw) {
+  // 优先解析阿里云 reason JSON 中的 riskTips
+  if (typeof reasonRaw === 'string' && reasonRaw.trim()) {
+    try {
+      const parsed = JSON.parse(reasonRaw);
+      if (parsed && typeof parsed.riskTips === 'string' && parsed.riskTips.trim()) {
+        return parsed.riskTips.trim();
+      }
+    } catch (e) {}
+  }
+
+  // 回退使用标签中文映射
+  const labels = String(labelsStr || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s && s.toLowerCase() !== 'none' && s.toLowerCase() !== 'nonlabel');
+  if (labels.length === 0) return '';
+  return labels.map((l) => ALIYUN_LABEL_MAP[l] || l).join('、');
+}
+
+function parseAliyunModerationResponse(json) {
+  if (!json || typeof json !== 'object') return null;
+  const code = json.Code ?? json.code;
+  if (code !== 200) return null;
+
+  const data = json.Data ?? json.data;
+  if (!data || typeof data !== 'object') return { safe: true, reason: '' };
+
+  // 1) TextModeration 通用返回格式：{ labels, reason } 或 { Labels, Reason }
+  const labels = data.labels ?? data.Labels;
+  const reason = data.reason ?? data.Reason;
+  if (typeof labels === 'string') {
+    const cleaned = labels.trim();
+    if (!cleaned || cleaned.toLowerCase() === 'none' || cleaned.toLowerCase() === 'nonlabel') {
+      return { safe: true, reason: '' };
+    }
+    return { safe: false, reason: formatAliyunReason(cleaned, reason) };
+  }
+
+  // 2) TextModerationPlus 返回格式：{ RiskLevel, Result: [{ Label, Description, ... }] }
+  const riskLevel = data.RiskLevel ?? data.riskLevel;
+  const results = data.Result ?? data.result;
+  if (typeof riskLevel === 'string') {
+    if (riskLevel.toLowerCase() === 'none') {
+      return { safe: true, reason: '' };
+    }
+    let detail = '';
+    if (Array.isArray(results)) {
+      const items = results
+        .map((r) => ({
+          label: r && (r.Label ?? r.label),
+          description: r && (r.Description ?? r.description)
+        }))
+        .filter((r) => r.label && String(r.label).toLowerCase() !== 'nonlabel')
+        .map((r) => r.description || ALIYUN_LABEL_MAP[r.label] || r.label);
+      detail = items.join('、');
+    }
+    return { safe: false, reason: detail || `风险等级：${riskLevel}` };
+  }
+
+  // 无 labels 且无 riskLevel 时默认安全
+  return { safe: true, reason: '' };
+}
+
+async function callAliyunTextModeration(config, chunk) {
+  const serviceParameters = JSON.stringify({ content: chunk });
+  const bodyParams = new URLSearchParams();
+  bodyParams.set('Service', config.service);
+  bodyParams.set('ServiceParameters', serviceParameters);
+  const body = bodyParams.toString();
+
+  const contentSha256 = await sha256Hex(body);
+  const xAcsDate = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+  const nonce = crypto.randomUUID().replace(/-/g, '');
+  const contentType = 'application/x-www-form-urlencoded';
+
+  // 按小写 Header 名升序拼接 CanonicalHeaders 与 SignedHeaders（ACS3-HMAC-SHA256 规范）
+  const headerEntries = [
+    ['content-type', contentType],
+    ['host', config.endpoint],
+    ['x-acs-action', config.action],
+    ['x-acs-content-sha256', contentSha256],
+    ['x-acs-date', xAcsDate],
+    ['x-acs-signature-nonce', nonce],
+    ['x-acs-version', ALIYUN_MODERATION_API_VERSION]
+  ];
+
+  const canonicalHeaders = headerEntries.map(([k, v]) => `${k}:${v}\n`).join('');
+  const signedHeaders = headerEntries.map(([k]) => k).join(';');
+  const canonicalRequest = [
+    'POST',
+    '/',
+    '',
+    canonicalHeaders,
+    signedHeaders,
+    contentSha256
+  ].join('\n');
+
+  const hashedCanonicalRequest = await sha256Hex(canonicalRequest);
+  const stringToSign = `ACS3-HMAC-SHA256\n${hashedCanonicalRequest}`;
+  const signature = await hmacSha256Hex(config.accessKeySecret, stringToSign);
+  const authorization =
+    `ACS3-HMAC-SHA256 Credential=${config.accessKeyId},SignedHeaders=${signedHeaders},Signature=${signature}`;
+
+  const res = await fetch(`https://${config.endpoint}/`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': contentType,
+      'x-acs-action': config.action,
+      'x-acs-version': ALIYUN_MODERATION_API_VERSION,
+      'x-acs-date': xAcsDate,
+      'x-acs-signature-nonce': nonce,
+      'x-acs-content-sha256': contentSha256,
+      'Authorization': authorization
+    },
+    body,
+    signal: AbortSignal.timeout(ALIYUN_MODERATION_TIMEOUT_MS)
+  });
+
+  const text = await res.text();
+  let json = null;
+  try {
+    json = JSON.parse(text);
+  } catch (e) {}
+
+  if (!res.ok) {
+    throw new Error(`Aliyun HTTP ${res.status}: ${text.slice(0, 300)}`);
+  }
+  return json;
+}
+
+async function moderateClipboardContent(env, name, content) {
+  const config = getAliyunModerationConfig(env);
+  if (!config.enabled) {
+    return { ok: true };
+  }
+  if (!config.accessKeyId || !config.accessKeySecret) {
+    console.error('Aliyun moderation enabled, but AccessKey credentials are missing');
+    if (config.failOpen) return { ok: true };
+    return { ok: false, status: 503, error: '内容安全审查未正确配置，请联系管理员' };
+  }
+
+  // ugc_moderation_byllm 系列支持单次 2000 字，其余服务默认按 600 字分段审查
+  const chunkSize = config.service.startsWith('ugc_moderation_byllm')
+    ? ALIYUN_MODERATION_LLM_CHUNK_SIZE
+    : ALIYUN_MODERATION_DEFAULT_CHUNK_SIZE;
+  const fullText = `${name}\n${content}`;
+  const chunks = [];
+  for (let i = 0; i < fullText.length; i += chunkSize) {
+    chunks.push(fullText.slice(i, i + chunkSize));
+  }
+
+  try {
+    for (let i = 0; i < chunks.length; i++) {
+      const json = await callAliyunTextModeration(config, chunks[i]);
+      const parsed = parseAliyunModerationResponse(json);
+      if (!parsed) {
+        console.error('Unexpected Aliyun moderation response:', JSON.stringify(json));
+        if (config.failOpen) return { ok: true };
+        return { ok: false, status: 503, error: '内容安全审查服务响应异常，请稍后再试' };
+      }
+      if (!parsed.safe) {
+        const detail = parsed.reason ? `（${parsed.reason}）` : '';
+        return { ok: false, status: 422, error: `内容未通过安全审查${detail}` };
+      }
+    }
+    return { ok: true };
+  } catch (err) {
+    console.error('Aliyun moderation failed:', err);
+    if (config.failOpen) return { ok: true };
+    return { ok: false, status: 503, error: '内容安全审查服务暂时不可用，请稍后再试' };
+  }
+}
+
 // ---------- 核心操作 ----------
 // 统一全局密码验证接口：
 // - 传入 name：校验密码并签发创建令牌（用于创建剪贴板流程）
@@ -501,6 +755,12 @@ async function createClipboard(body, request, env, createVerificationEnabled, ac
     if (!(await isValidCreateToken(env, createToken, name))) {
       return jsonResponse({ error: '创建令牌无效或已过期' }, 401);
     }
+  }
+
+  // 阿里云内容安全审查（在鉴权和基础校验通过后执行，避免无效请求消耗额度）
+  const moderation = await moderateClipboardContent(env, name, content);
+  if (!moderation.ok) {
+    return jsonResponse({ error: moderation.error }, moderation.status);
   }
 
   // 关闭访问密码功能时忽略密码字段，防止绕过前端设置密码
@@ -604,6 +864,12 @@ async function updateClipboard(body, request, env, createVerificationEnabled, al
       return jsonResponse({ error: '无效的过期天数' }, 400);
     }
     newExpiresAt = newDays > 0 ? Date.now() + daysToMillis(newDays) : null;
+  }
+
+  // 阿里云内容安全审查
+  const moderation = await moderateClipboardContent(env, name, content);
+  if (!moderation.ok) {
+    return jsonResponse({ error: moderation.error }, moderation.status);
   }
 
   // 处理访问密码变更：仅在启用访问密码功能时生效，空字符串表示清除密码
@@ -1116,7 +1382,7 @@ function getOpenPage(meta) {
         </div>
         <div class="flex space-x-2">
           <button id="copyBtn" class="bg-gray-200 hover:bg-gray-300 text-gray-800 px-4 py-2 rounded-lg text-sm">复制</button>
-          <button id="editBtn" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm">编辑</button>
+          <button id="editBtn" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm disabled:opacity-50 disabled:cursor-not-allowed">编辑</button>
           <button id="deleteBtn" class="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg text-sm disabled:opacity-50 disabled:cursor-not-allowed">删除</button>
         </div>
       </div>
@@ -1175,6 +1441,8 @@ function getOpenPage(meta) {
     let globalPassword = '';
     let originalContent = '';
     let renderAvailable = enableMarkdown;
+    let isEditing = false;
+    let isOpeningEditor = false;
     let toastTimer = null;
 
     function showToast(message) {
@@ -1251,12 +1519,16 @@ function getOpenPage(meta) {
     }
 
     function showPreview() {
+      isEditing = false;
+      document.getElementById('editBtn').disabled = false;
       setContent(document.getElementById('contentDisplay'), originalContent);
       document.getElementById('previewMode').classList.remove('hidden');
       document.getElementById('editMode').classList.add('hidden');
     }
 
     function showEditor() {
+      isEditing = true;
+      document.getElementById('editBtn').disabled = true;
       // 初始化过期时间下拉框（仅在首次编辑时填充选项）
       const sel = document.getElementById('editExpiresInDays');
       if (sel.options.length === 0) {
@@ -1412,6 +1684,26 @@ function getOpenPage(meta) {
         }
       }
     }
+
+    async function copyContent() {
+      try {
+        await navigator.clipboard.writeText(originalContent);
+        const btn = document.getElementById('copyBtn');
+        btn.textContent = '已复制';
+        setTimeout(() => btn.textContent = '复制', 2000);
+      } catch (err) {
+        const textarea = document.createElement('textarea');
+        textarea.value = originalContent;
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textarea);
+        const btn = document.getElementById('copyBtn');
+        btn.textContent = '已复制';
+        setTimeout(() => btn.textContent = '复制', 2000);
+      }
+    }
+
     document.getElementById('passwordForm').addEventListener('submit', async (e) => {
       e.preventDefault();
       const pwd = document.getElementById('passwordInput').value;
@@ -1422,10 +1714,16 @@ function getOpenPage(meta) {
 
     document.getElementById('copyBtn').addEventListener('click', copyContent);
     document.getElementById('editBtn').addEventListener('click', async () => {
-      if (createVerificationEnabled) {
-        try { globalPassword = await promptGlobalPassword(); } catch (e) { return; }
+      if (isEditing || isOpeningEditor) return;
+      isOpeningEditor = true;
+      try {
+        if (createVerificationEnabled) {
+          try { globalPassword = await promptGlobalPassword(); } catch (e) { return; }
+        }
+        showEditor();
+      } finally {
+        isOpeningEditor = false;
       }
-      showEditor();
     });
     document.getElementById('editContent').addEventListener('input', updateEditPreview);
     document.getElementById('cancelBtn').addEventListener('click', showPreview);
@@ -1536,97 +1834,6 @@ function getOpenPage(meta) {
         deleteBtn.disabled = false;
         deleteBtn.textContent = '删除';
       }
-    });
-
-    document.getElementById('copyBtn').addEventListener('click', copyContent);
-    document.getElementById('editBtn').addEventListener('click', async () => {
-      if (createVerificationEnabled) {
-        try { globalPassword = await promptGlobalPassword(); } catch (e) { return; }
-      }
-      showEditor();
-    });
-    document.getElementById('editContent').addEventListener('input', updateEditPreview);
-    document.getElementById('cancelBtn').addEventListener('click', showPreview);
-
-    document.getElementById('saveBtn').addEventListener('click', async () => {
-      const content = document.getElementById('editContent').value;
-      if (content.length > 102400) {
-        document.getElementById('editError').textContent = '内容过长（最多 100KB）';
-        return;
-      }
-      const editPwdEl = document.getElementById('editPassword');
-      const editClearEl = document.getElementById('editClearPassword');
-      const newPassword = editPwdEl ? editPwdEl.value : '';
-      const clearPassword = editClearEl ? editClearEl.checked : false;
-      const editExpiresInDays = parseInt(document.getElementById('editExpiresInDays').value, 10);
-      document.getElementById('editError').textContent = '';
-
-      function buildBody() {
-        const b = { name, content, password: currentPassword, createPassword: globalPassword, expiresInDays: editExpiresInDays };
-        if (clearPassword) { b.newPassword = ''; }
-        else if (newPassword) { b.newPassword = newPassword; }
-        return b;
-      }
-
-      try {
-        let res = await fetch('/api/update', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(buildBody())
-        });
-        let data = await parseJson(res);
-        // 全局密码错误 → 重新弹出密码框，不离开编辑页
-        while ((res.status === 401 || res.status === 403) && createVerificationEnabled && data.error && data.error.includes('全局创建密码')) {
-          try { globalPassword = await promptGlobalPassword(); } catch (e) { return; }
-          document.getElementById('editError').textContent = '';
-          res = await fetch('/api/update', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(buildBody())
-          });
-          data = await parseJson(res);
-        }
-        if (res.ok) {
-          originalContent = content;
-          expiresInDays = editExpiresInDays;
-          document.getElementById('expiryText').textContent =
-            expiresInDays === 0 ? '永不删除' : expiresInDays + ' 天后自动删除';
-          showPreview();
-        } else {
-          document.getElementById('editError').textContent = data.error || '更新失败';
-        }
-      } catch (err) { document.getElementById('editError').textContent = '网络错误，请检查连接'; }
-    });
-
-    document.getElementById('deleteBtn').addEventListener('click', async () => {
-      if (createVerificationEnabled) {
-        try { globalPassword = await promptGlobalPassword(); } catch (e) { return; }
-      }
-      if (!confirm('确定要删除这个剪贴板吗？此操作不可撤销。')) return;
-      try {
-        let res = await fetch('/api/delete', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name, password: currentPassword, createPassword: globalPassword })
-        });
-        let data = await parseJson(res);
-        // 全局密码错误 → 重新弹出密码框确认后重试
-        while ((res.status === 401 || res.status === 403) && createVerificationEnabled && data.error && data.error.includes('全局创建密码')) {
-          try { globalPassword = await promptGlobalPassword(); } catch (e) { return; }
-          if (!confirm('确定要删除这个剪贴板吗？此操作不可撤销。')) return;
-          res = await fetch('/api/delete', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name, password: currentPassword, createPassword: globalPassword })
-          });
-          data = await parseJson(res);
-        }
-        if (res.ok) {
-          window.location.href = '/';
-        } else {
-          alert(data.error || '删除失败');
-        }
-      } catch (err) { alert('网络错误，请检查连接'); }
     });
 
     // luogu-renderer 生成的代码块复制按钮（事件委托，点击复制代码块内容）
