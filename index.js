@@ -11,9 +11,12 @@ const DEFAULT_EXPIRY_DAYS = 3;
 const CREATE_TOKEN_COOKIE = 'create_token';
 const CREATE_TOKEN_TTL_MS = 10 * 60 * 1000; // 创建令牌有效期 10 分钟
 const PBKDF2_DEFAULT_ITERATIONS = 10000;
+const PROJECT_NAME = 'mypaste';
+const PROJECT_URL = 'https://github.com/CoffeeCat138/mypaste';
 const RATE_LIMITS = {
-  verifyCreate: { limit: 10, windowMs: 10 * 60 * 1000 },    // 创建验证：10 次 / 10 分钟
-  passwordAttempt: { limit: 10, windowMs: 10 * 60 * 1000 }, // 剪贴板密码试错：10 次 / 10 分钟
+  globalPassword: { limit: 10, windowMs: 10 * 60 * 1000 },   // 全局密码试错：10 次失败 / 10 分钟
+  passwordAttempt: { limit: 10, windowMs: 10 * 60 * 1000 },  // 剪贴板密码试错：10 次失败 / 10 分钟
+  createClipboard: { limit: 20, windowMs: 10 * 60 * 1000 },  // 创建剪贴板频率：20 次 / 10 分钟
 };
 const CLIPBOARD_COLUMNS =
   'name, content, password_hash, created_at, updated_at, expires_in_days, expires_at, enable_markdown';
@@ -21,8 +24,20 @@ const CLIPBOARD_COLUMNS =
 // ---------- 内存限速（按 IP，Worker isolate 级别）----------
 const rateLimitStore = new Map();
 
-// 计数 + 判断是否超限；超过 limit 返回 true
-function isRateLimited(ip, key, { limit, windowMs }) {
+// 仅检查是否已达限速阈值（不递增计数），用于密码校验前快速拦截
+function isRateLimitBlocked(ip, key, { limit }) {
+  const now = Date.now();
+  const bucketKey = ip + '|' + key;
+  const bucket = rateLimitStore.get(bucketKey);
+  if (!bucket || bucket.resetAt <= now) {
+    if (bucket) rateLimitStore.delete(bucketKey);
+    return false;
+  }
+  return bucket.count >= limit;
+}
+
+// 递增计数并返回是否超过 limit（适用于频率限速或记录密码失败）
+function recordRateLimitHit(ip, key, { limit, windowMs }) {
   const now = Date.now();
   const bucketKey = ip + '|' + key;
   let bucket = rateLimitStore.get(bucketKey);
@@ -33,6 +48,11 @@ function isRateLimited(ip, key, { limit, windowMs }) {
   bucket.count += 1;
   if (rateLimitStore.size > 5000) pruneRateLimitStore(now);
   return bucket.count > limit;
+}
+
+// 密码验证成功后清除失败记录，避免正常用户累计触发限速
+function clearRateLimit(ip, key) {
+  rateLimitStore.delete(ip + '|' + key);
 }
 
 function pruneRateLimitStore(now = Date.now()) {
@@ -254,11 +274,13 @@ export default {
     const path = url.pathname;
 
     const createVerificationEnabled = env.CREATE_PASSWORD === 'true';
+    // 是否启用单条剪贴板访问密码：默认启用；在 Workers 环境变量中设 ENABLE_ACCESS_PASSWORD=false 可关闭
+    const accessPasswordEnabled = env.ENABLE_ACCESS_PASSWORD !== 'false';
     const allowedCreatePasswords = parseAllowedPasswords(env.ALLOWED_PASSWORDS);
 
     // 处理 API 请求
     if (path.startsWith('/api/')) {
-      return handleApiRequest(request, env, createVerificationEnabled, allowedCreatePasswords);
+      return handleApiRequest(request, env, createVerificationEnabled, allowedCreatePasswords, accessPasswordEnabled);
     }
 
     // 已知静态路径直接 404，避免无效的 D1 查询
@@ -285,13 +307,16 @@ export default {
     const row = await getExistingClipboard(env, name);
 
     if (!row) {
+      if (!isValidClipboardName(name)) {
+        return htmlResponse(getInvalidNamePage(name), 400);
+      }
       // 剪贴板不存在（或已过期）：进入创建流程
       const token = getCookie(request, CREATE_TOKEN_COOKIE);
       const tokenValid = createVerificationEnabled && (await isValidCreateToken(env, token, name));
       if (createVerificationEnabled && !tokenValid) {
         return htmlResponse(getVerifyPage(name));
       }
-      return htmlResponse(getCreatePage(name));
+      return htmlResponse(getCreatePage(name, accessPasswordEnabled));
     }
 
     const meta = {
@@ -302,6 +327,7 @@ export default {
       expiresInDays: row.expires_in_days,
       enableMarkdown: row.enable_markdown === 1,
       createVerificationEnabled,
+      accessPasswordEnabled,
       // 无密码剪贴板：内容直接内联进页面，省去一次 API 往返；有密码则必须验证后获取
       inlineContent: row.password_hash ? null : row.content
     };
@@ -315,7 +341,7 @@ export default {
 };
 
 // ---------- API 处理 ----------
-async function handleApiRequest(request, env, createVerificationEnabled, allowedCreatePasswords) {
+async function handleApiRequest(request, env, createVerificationEnabled, allowedCreatePasswords, accessPasswordEnabled) {
   const url = new URL(request.url);
   const path = url.pathname;
   const method = request.method;
@@ -349,14 +375,12 @@ async function handleApiRequest(request, env, createVerificationEnabled, allowed
   switch (path) {
     case '/api/verify-create':
       return verifyCreatePassword(body, request, env, createVerificationEnabled, allowedCreatePasswords);
-    case '/api/check-create-password':
-      return checkCreatePassword(body, request, env, createVerificationEnabled, allowedCreatePasswords);
     case '/api/create':
-      return createClipboard(body, request, env, createVerificationEnabled);
+      return createClipboard(body, request, env, createVerificationEnabled, accessPasswordEnabled);
     case '/api/get':
       return getClipboardContent(body, request, env);
     case '/api/update':
-      return updateClipboard(body, request, env, createVerificationEnabled, allowedCreatePasswords);
+      return updateClipboard(body, request, env, createVerificationEnabled, allowedCreatePasswords, accessPasswordEnabled);
     case '/api/delete':
       return deleteClipboard(body, request, env, createVerificationEnabled, allowedCreatePasswords);
     default:
@@ -364,13 +388,49 @@ async function handleApiRequest(request, env, createVerificationEnabled, allowed
   }
 }
 
+// ---------- 认证辅助 ----------
+// 校验全局创建密码（仅在失败时计数，成功时清零）；返回 'ok' | 'wrong_password' | 'rate_limited'
+function checkGlobalPassword(request, password, allowedCreatePasswords) {
+  const ip = getClientIp(request);
+  if (isRateLimitBlocked(ip, 'global-pwd', RATE_LIMITS.globalPassword)) {
+    return 'rate_limited';
+  }
+  if (!allowedCreatePasswords.some((allowed) => timingSafeEqual(password, allowed))) {
+    recordRateLimitHit(ip, 'global-pwd', RATE_LIMITS.globalPassword);
+    return 'wrong_password';
+  }
+  clearRateLimit(ip, 'global-pwd');
+  return 'ok';
+}
+
+// 校验剪贴板访问密码（仅在失败时计数，成功时清零）；返回 'ok' | 'need_password' | 'wrong_password' | 'rate_limited'
+async function checkClipboardPassword(request, row, password, name) {
+  if (!row.password_hash) return 'ok';
+  if (typeof password !== 'string' || !password) return 'need_password';
+  const ip = getClientIp(request);
+  const key = 'pwd:' + name;
+  if (isRateLimitBlocked(ip, key, RATE_LIMITS.passwordAttempt)) {
+    return 'rate_limited';
+  }
+  if (!(await verifyPassword(password, row.password_hash))) {
+    recordRateLimitHit(ip, key, RATE_LIMITS.passwordAttempt);
+    return 'wrong_password';
+  }
+  clearRateLimit(ip, key);
+  return 'ok';
+}
+
 // ---------- 核心操作 ----------
+// 统一全局密码验证接口：
+// - 传入 name：校验密码并签发创建令牌（用于创建剪贴板流程）
+// - 不传 name：仅校验全局密码（用于编辑/删除前验证）
 async function verifyCreatePassword(body, request, env, createVerificationEnabled, allowedCreatePasswords) {
   const { name, password } = body;
   if (!createVerificationEnabled) {
     return jsonResponse({ error: '未启用创建验证' }, 400);
   }
-  if (!isValidClipboardName(name)) {
+  const needToken = name !== undefined && name !== null && name !== '';
+  if (needToken && !isValidClipboardName(name)) {
     return jsonResponse({ error: '剪贴板名称无效' }, 400);
   }
   if (typeof password !== 'string' || !password) {
@@ -379,11 +439,17 @@ async function verifyCreatePassword(body, request, env, createVerificationEnable
   if (allowedCreatePasswords.length === 0) {
     return jsonResponse({ error: '验证配置错误，请联系管理员' }, 500);
   }
-  if (isRateLimited(getClientIp(request), 'verify-create', RATE_LIMITS.verifyCreate)) {
+
+  const auth = checkGlobalPassword(request, password, allowedCreatePasswords);
+  if (auth === 'rate_limited') {
     return jsonResponse({ error: '尝试次数过多，请稍后再试' }, 429);
   }
-  if (!allowedCreatePasswords.some((allowed) => timingSafeEqual(password, allowed))) {
-    return jsonResponse({ error: '密码错误' }, 403);
+  if (auth === 'wrong_password') {
+    return jsonResponse({ error: needToken ? '密码错误' : '全局创建密码错误' }, 403);
+  }
+
+  if (!needToken) {
+    return jsonResponse({ success: true });
   }
 
   const token = crypto.randomUUID();
@@ -400,29 +466,7 @@ async function verifyCreatePassword(body, request, env, createVerificationEnable
     { 'Set-Cookie': buildCreateTokenCookie(token, CREATE_TOKEN_TTL_MS / 1000, secure) }
   );
 }
-
-async function checkCreatePassword(body, request, env, createVerificationEnabled, allowedCreatePasswords) {
-  if (!createVerificationEnabled) {
-    return jsonResponse({ error: '未启用创建验证' }, 400);
-  }
-  const { password } = body;
-  if (typeof password !== 'string' || !password) {
-    return jsonResponse({ error: '请输入密码' }, 400);
-  }
-  // 暴力破解防护：与 verify-create 共用同一个限速桶（共用窗口内 10 次上限）
-  if (isRateLimited(getClientIp(request), 'verify-create', RATE_LIMITS.verifyCreate)) {
-    return jsonResponse({ error: '尝试次数过多，请稍后再试' }, 429);
-  }
-  if (allowedCreatePasswords.length === 0) {
-    return jsonResponse({ error: '验证配置错误' }, 500);
-  }
-  if (!allowedCreatePasswords.some((allowed) => timingSafeEqual(password, allowed))) {
-    return jsonResponse({ error: '全局创建密码错误' }, 403);
-  }
-  return jsonResponse({ success: true });
-}
-
-async function createClipboard(body, request, env, createVerificationEnabled) {
+async function createClipboard(body, request, env, createVerificationEnabled, accessPasswordEnabled) {
   const { name, content, password, expiresInDays, enableMarkdown } = body;
 
   if (!isValidClipboardName(name)) {
@@ -443,6 +487,11 @@ async function createClipboard(body, request, env, createVerificationEnabled) {
     return jsonResponse({ error: '无效的过期天数' }, 400);
   }
 
+  // 创建频率限速：防止短时间内批量刷库
+  if (recordRateLimitHit(getClientIp(request), 'create-clipboard', RATE_LIMITS.createClipboard)) {
+    return jsonResponse({ error: '创建过于频繁，请稍后再试' }, 429);
+  }
+
   let createToken = '';
   if (createVerificationEnabled) {
     createToken = getCookie(request, CREATE_TOKEN_COOKIE);
@@ -454,7 +503,8 @@ async function createClipboard(body, request, env, createVerificationEnabled) {
     }
   }
 
-  const hasPassword = typeof password === 'string' && password.trim() !== '';
+  // 关闭访问密码功能时忽略密码字段，防止绕过前端设置密码
+  const hasPassword = accessPasswordEnabled && typeof password === 'string' && password.trim() !== '';
   let passwordHash = null;
   if (hasPassword) {
     passwordHash = await hashPassword(password, env);
@@ -489,19 +539,6 @@ async function createClipboard(body, request, env, createVerificationEnabled) {
   return jsonResponse({ success: true, expiresInDays: days, enableMarkdown: markdownEnabled === 1 });
 }
 
-// 校验密码；返回 'ok' | 'need_password' | 'wrong_password' | 'rate_limited'
-async function checkClipboardPassword(request, row, password, name) {
-  if (!row.password_hash) return 'ok';
-  if (typeof password !== 'string' || !password) return 'need_password';
-  if (!(await verifyPassword(password, row.password_hash))) {
-    if (isRateLimited(getClientIp(request), 'pwd:' + name, RATE_LIMITS.passwordAttempt)) {
-      return 'rate_limited';
-    }
-    return 'wrong_password';
-  }
-  return 'ok';
-}
-
 async function getClipboardContent(body, request, env) {
   const { name, password } = body;
   if (!name) return jsonResponse({ error: '缺少剪贴板名称' }, 400);
@@ -524,7 +561,7 @@ async function getClipboardContent(body, request, env) {
   });
 }
 
-async function updateClipboard(body, request, env, createVerificationEnabled, allowedCreatePasswords) {
+async function updateClipboard(body, request, env, createVerificationEnabled, allowedCreatePasswords, accessPasswordEnabled) {
   const { name, content, password, createPassword, expiresInDays, newPassword } = body;
   if (!name || typeof content !== 'string') {
     return jsonResponse({ error: '参数不完整' }, 400);
@@ -539,12 +576,16 @@ async function updateClipboard(body, request, env, createVerificationEnabled, al
   const row = await getExistingClipboard(env, name);
   if (!row) return jsonResponse({ error: '剪贴板不存在或已过期' }, 404);
 
-  // 如果启用了全局创建密码，编辑前必须验证
+  // 如果启用了全局创建密码，编辑前必须验证（复用同一失败限速桶）
   if (createVerificationEnabled) {
     if (!createPassword || typeof createPassword !== 'string') {
       return jsonResponse({ error: '需要全局创建密码' }, 401);
     }
-    if (!allowedCreatePasswords.some((allowed) => timingSafeEqual(createPassword, allowed))) {
+    const globalAuth = checkGlobalPassword(request, createPassword, allowedCreatePasswords);
+    if (globalAuth === 'rate_limited') {
+      return jsonResponse({ error: '尝试次数过多，请稍后再试' }, 429);
+    }
+    if (globalAuth === 'wrong_password') {
       return jsonResponse({ error: '全局创建密码错误' }, 403);
     }
   }
@@ -565,9 +606,9 @@ async function updateClipboard(body, request, env, createVerificationEnabled, al
     newExpiresAt = newDays > 0 ? Date.now() + daysToMillis(newDays) : null;
   }
 
-  // 处理访问密码变更：空字符串表示清除密码
+  // 处理访问密码变更：仅在启用访问密码功能时生效，空字符串表示清除密码
   let newPasswordHash = undefined; // undefined = 不修改；null = 清除密码
-  if (newPassword !== undefined) {
+  if (accessPasswordEnabled && newPassword !== undefined) {
     if (typeof newPassword !== 'string') {
       return jsonResponse({ error: '参数格式错误' }, 400);
     }
@@ -608,12 +649,16 @@ async function deleteClipboard(body, request, env, createVerificationEnabled, al
   const row = await getExistingClipboard(env, name);
   if (!row) return jsonResponse({ error: '剪贴板不存在或已过期' }, 404);
 
-  // 如果启用了全局创建密码，删除前必须验证
+  // 如果启用了全局创建密码，删除前必须验证（复用同一失败限速桶）
   if (createVerificationEnabled) {
     if (!createPassword || typeof createPassword !== 'string') {
       return jsonResponse({ error: '需要全局创建密码' }, 401);
     }
-    if (!allowedCreatePasswords.some((allowed) => timingSafeEqual(createPassword, allowed))) {
+    const globalAuth = checkGlobalPassword(request, createPassword, allowedCreatePasswords);
+    if (globalAuth === 'rate_limited') {
+      return jsonResponse({ error: '尝试次数过多，请稍后再试' }, 429);
+    }
+    if (globalAuth === 'wrong_password') {
       return jsonResponse({ error: '全局创建密码错误' }, 403);
     }
   }
@@ -646,6 +691,16 @@ async function cleanupExpiredData(env) {
 }
 
 // ---------- HTML 页面 ----------
+function getFooterHtml() {
+  return `
+  <footer class="py-4 px-4 text-center text-xs text-gray-400 border-t border-gray-200/70 bg-white/60">
+    Powered by
+    <a href="${PROJECT_URL}" target="_blank" rel="noopener noreferrer" class="text-gray-500 hover:text-blue-600 underline underline-offset-2 transition">${PROJECT_NAME}</a>
+    ·
+    <a href="${PROJECT_URL}" target="_blank" rel="noopener noreferrer" class="hover:text-blue-600 transition">GitHub</a>
+  </footer>`;
+}
+
 function getHomePage() {
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -656,11 +711,38 @@ function getHomePage() {
   <link rel="icon" href="data:,">
   <script src="https://cdn.tailwindcss.com/3.4.17"></script>
 </head>
-<body class="bg-gray-50 min-h-screen flex items-center justify-center">
-  <div class="text-center px-4">
-    <h1 class="text-5xl font-bold text-gray-900 mb-4">☁️ 云剪贴板</h1>
-    <p class="text-xl text-gray-600">在地址栏输入 <code class="bg-gray-200 px-2 py-1 rounded">域名.com/剪贴板名</code> 即可新建或打开</p>
-  </div>
+<body class="bg-gray-50 min-h-screen flex flex-col">
+  <main class="flex-1 flex items-center justify-center">
+    <div class="text-center px-4">
+      <h1 class="text-5xl font-bold text-gray-900 mb-4">☁️ 云剪贴板</h1>
+      <p class="text-xl text-gray-600">在地址栏输入 <code class="bg-gray-200 px-2 py-1 rounded">域名.com/剪贴板名</code> 即可新建或打开</p>
+    </div>
+  </main>
+  ${getFooterHtml()}
+</body>
+</html>`;
+}
+
+function getInvalidNamePage(name) {
+  return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>无效的剪贴板名称 - 云剪贴板</title>
+  <link rel="icon" href="data:,">
+  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
+</head>
+<body class="bg-gray-50 min-h-screen flex flex-col">
+  <main class="flex-1 flex items-center justify-center px-4">
+    <div class="w-full max-w-md mx-auto bg-white rounded-xl shadow p-8 text-center">
+      <h1 class="text-2xl font-bold text-gray-900 mb-3">剪贴板名称无效</h1>
+      <p class="text-sm text-gray-600 mb-2 break-all">名称 <code class="bg-gray-100 px-1.5 py-0.5 rounded">${escapeHtml(name)}</code> 不符合规则。</p>
+      <p class="text-xs text-gray-500 mb-6">名称长度需为 1–64 个字符，且不能包含空格、斜杠或特殊符号（? # % &amp; +）。</p>
+      <a href="/" class="inline-block bg-blue-600 hover:bg-blue-700 text-white px-5 py-2 rounded-lg text-sm transition">返回首页</a>
+    </div>
+  </main>
+  ${getFooterHtml()}
 </body>
 </html>`;
 }
@@ -675,16 +757,19 @@ function getVerifyPage(name) {
   <link rel="icon" href="data:,">
   <script src="https://cdn.tailwindcss.com/3.4.17"></script>
 </head>
-<body class="bg-gray-50 min-h-screen flex items-center justify-center">
-  <div class="max-w-md mx-auto bg-white rounded-xl shadow p-8">
-    <h1 class="text-2xl font-bold mb-4">创建剪贴板需要验证</h1>
-    <p class="text-gray-600 mb-6">请输入全局创建密码以继续</p>
-    <form id="verifyForm">
-      <input type="password" id="createPasswordInput" class="w-full border border-gray-300 rounded-lg px-3 py-2 mb-4" placeholder="密码">
-      <button type="submit" id="verifyCreateBtn" class="w-full bg-blue-600 text-white py-2 rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed">验证</button>
-      <p id="verifyError" class="text-red-500 mt-3"></p>
-    </form>
-  </div>
+<body class="bg-gray-50 min-h-screen flex flex-col">
+  <main class="flex-1 flex items-center justify-center px-4">
+    <div class="w-full max-w-md mx-auto bg-white rounded-xl shadow p-8">
+      <h1 class="text-2xl font-bold mb-4">创建剪贴板需要验证</h1>
+      <p class="text-gray-600 mb-6">请输入全局创建密码以继续</p>
+      <form id="verifyForm">
+        <input type="password" id="createPasswordInput" class="w-full border border-gray-300 rounded-lg px-3 py-2 mb-4" placeholder="密码">
+        <button type="submit" id="verifyCreateBtn" class="w-full bg-blue-600 text-white py-2 rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed">验证</button>
+        <p id="verifyError" class="text-red-500 mt-3"></p>
+      </form>
+    </div>
+  </main>
+  ${getFooterHtml()}
   <script>
     const name = ${safeJsonStringify(name)};
     const form = document.getElementById('verifyForm');
@@ -692,7 +777,7 @@ function getVerifyPage(name) {
       e.preventDefault();
       const btn = document.getElementById('verifyCreateBtn');
       const errorEl = document.getElementById('verifyError');
-      const password = document.getElementById('createPasswordInput').value;
+      const password = document.getElementById('createPasswordInput').value.trim();
       errorEl.textContent = '';
       if (!password) {
         errorEl.textContent = '请输入密码';
@@ -725,7 +810,13 @@ function getVerifyPage(name) {
 </html>`;
 }
 
-function getCreatePage(name) {
+function getCreatePage(name, accessPasswordEnabled = true) {
+  const passwordInputHtml = accessPasswordEnabled ? `
+          <div class="flex items-center gap-2">
+            <label class="text-sm text-gray-600 whitespace-nowrap">访问密码</label>
+            <input type="password" id="password" class="border border-gray-300 rounded-lg px-3 py-1.5 text-sm w-32 focus:ring-2 focus:ring-blue-500" placeholder="可选">
+          </div>` : '';
+
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -757,11 +848,7 @@ function getCreatePage(name) {
     <div class="bg-white border-b border-gray-200 px-4 py-3 shadow-sm">
       <div class="max-w-6xl mx-auto">
         <h1 class="text-xl font-bold mb-3">📝 新建剪贴板：${escapeHtml(name)}</h1>
-        <div class="flex flex-wrap items-center gap-4">
-          <div class="flex items-center gap-2">
-            <label class="text-sm text-gray-600 whitespace-nowrap">访问密码</label>
-            <input type="password" id="password" class="border border-gray-300 rounded-lg px-3 py-1.5 text-sm w-32 focus:ring-2 focus:ring-blue-500" placeholder="可选">
-          </div>
+        <div class="flex flex-wrap items-center gap-4">${passwordInputHtml}
           <div class="flex items-center gap-2">
             <label class="text-sm text-gray-600 whitespace-nowrap">过期时间</label>
             <select id="expiresInDays" class="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:ring-2 focus:ring-blue-500">
@@ -794,10 +881,11 @@ function getCreatePage(name) {
         </div>
       </div>
       <div class="mt-4 max-w-6xl mx-auto">
-        <button id="createBtn" class="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2.5 rounded-lg text-sm font-medium transition">创建剪贴板</button>
+        <button id="createBtn" class="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2.5 rounded-lg text-sm font-medium transition disabled:opacity-50 disabled:cursor-not-allowed">创建剪贴板</button>
         <p id="error" class="text-red-500 mt-3"></p>
       </div>
     </div>
+    ${getFooterHtml()}
   </div>
 
   <script>
@@ -824,7 +912,12 @@ function getCreatePage(name) {
       try {
         const html = await renderer.render(text);
         if (seq !== renderSeq) return;
-        preview.innerHTML = window.DOMPurify ? window.DOMPurify.sanitize(html) : html;
+        // DOMPurify 不可用时降级为纯文本，避免未净化的 HTML 引发 XSS
+        if (window.DOMPurify && typeof window.DOMPurify.sanitize === 'function') {
+          preview.innerHTML = window.DOMPurify.sanitize(html);
+        } else {
+          preview.textContent = text;
+        }
       } catch (e) {
         if (seq !== renderSeq) return;
         renderAvailable = false;
@@ -836,10 +929,12 @@ function getCreatePage(name) {
     document.getElementById('enableMarkdown').addEventListener('change', updatePreview);
 
     document.getElementById('createBtn').addEventListener('click', async () => {
+      const btn = document.getElementById('createBtn');
       const errorEl = document.getElementById('error');
       errorEl.textContent = '';
       const content = document.getElementById('content').value;
-      const password = document.getElementById('password').value;
+      const passwordInput = document.getElementById('password');
+      const password = passwordInput ? passwordInput.value : '';
       const expiresInDays = parseInt(document.getElementById('expiresInDays').value);
       const enableMarkdown = document.getElementById('enableMarkdown').checked;
       if (!content || content.trim() === '') {
@@ -850,6 +945,8 @@ function getCreatePage(name) {
         errorEl.textContent = '内容过长（最多 100KB）';
         return;
       }
+      btn.disabled = true;
+      btn.textContent = '创建中…';
       try {
         const res = await fetch('/api/create', {
           method: 'POST',
@@ -864,6 +961,9 @@ function getCreatePage(name) {
         }
       } catch (err) {
         errorEl.textContent = '网络错误，请检查连接';
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '创建剪贴板';
       }
     });
   </script>
@@ -945,8 +1045,18 @@ function getMarkdownStyles() {
 }
 
 function getOpenPage(meta) {
-  const { name, hasPassword, createdAt, updatedAt, expiresInDays, enableMarkdown, inlineContent, createVerificationEnabled } = meta;
+  const { name, hasPassword, createdAt, updatedAt, expiresInDays, enableMarkdown, inlineContent, createVerificationEnabled, accessPasswordEnabled = true } = meta;
   const expiryText = expiresInDays === 0 ? '永不删除' : `${expiresInDays} 天后自动删除`;
+
+  const editPasswordHtml = accessPasswordEnabled ? `
+              <div class="flex items-center gap-2">
+                <label class="text-sm text-gray-600 whitespace-nowrap">修改访问密码</label>
+                <input type="password" id="editPassword" class="border border-gray-300 rounded-lg px-3 py-1.5 text-sm w-32 focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100 disabled:text-gray-400 disabled:cursor-not-allowed" placeholder="留空不变">
+                <label class="flex items-center gap-1 text-sm text-red-500 cursor-pointer select-none">
+                  <input type="checkbox" id="editClearPassword" class="h-3.5 w-3.5 accent-red-500">
+                  清除密码
+                </label>
+              </div>` : '';
 
   const markdownResources = enableMarkdown ? `
   <script src="https://cdn.jsdelivr.net/npm/luogu-renderer@1.0.5/dist/luogu-new-renderer.iife.js" integrity="sha384-uvo+AtndM549/9r8QeKtZ5fKy+TjqF/ssIXqMp2Fj4LZovtfKymdOjOkVFGtoX9S" crossorigin="anonymous"></script>
@@ -987,12 +1097,14 @@ function getOpenPage(meta) {
 </head>
 <body class="bg-gray-50">
   <div id="app" class="app-container">
-    <div id="passwordSection" class="${hasPassword ? '' : 'hidden'}">
-      <div class="max-w-md mx-auto mt-16 bg-white rounded-xl shadow p-8">
+    <div id="passwordSection" class="${hasPassword ? '' : 'hidden'} flex-1 flex items-center justify-center px-4">
+      <div class="w-full max-w-md mx-auto bg-white rounded-xl shadow p-8">
         <h2 class="text-2xl font-semibold mb-4">请输入密码</h2>
         <p class="text-gray-600 mb-6">剪贴板 <strong>${escapeHtml(name)}</strong> 受密码保护</p>
-        <input type="password" id="passwordInput" class="w-full border border-gray-300 rounded-lg px-3 py-2 mb-4 focus:ring-2 focus:ring-blue-500" placeholder="密码">
-        <button id="verifyBtn" class="w-full bg-blue-600 text-white py-2 rounded-lg hover:bg-blue-700">验证</button>
+        <form id="passwordForm">
+          <input type="password" id="passwordInput" class="w-full border border-gray-300 rounded-lg px-3 py-2 mb-4 focus:ring-2 focus:ring-blue-500" placeholder="密码">
+          <button type="submit" id="verifyBtn" class="w-full bg-blue-600 text-white py-2 rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed">验证</button>
+        </form>
         <p id="passwordError" class="text-red-500 mt-3"></p>
       </div>
     </div>
@@ -1000,12 +1112,12 @@ function getOpenPage(meta) {
       <div class="bg-white border-b border-gray-200 px-4 py-3 flex items-center justify-between flex-wrap gap-2 shadow-sm">
         <div>
           <h1 class="text-xl font-bold">📋 ${escapeHtml(name)}</h1>
-          <p class="text-xs text-gray-500">创建于 <span id="createdAtDisplay">${new Date(createdAt).toLocaleString()}</span> · <span id="expiryText">${expiryText}</span></p>
+          <p class="text-xs text-gray-500">创建于 <span id="createdAtDisplay">${new Date(createdAt).toLocaleString()}</span><span id="updatedAtWrap" class="${updatedAt && updatedAt !== createdAt ? '' : 'hidden'}"> · 更新于 <span id="updatedAtDisplay">${new Date(updatedAt || createdAt).toLocaleString()}</span></span> · <span id="expiryText">${expiryText}</span></p>
         </div>
         <div class="flex space-x-2">
           <button id="copyBtn" class="bg-gray-200 hover:bg-gray-300 text-gray-800 px-4 py-2 rounded-lg text-sm">复制</button>
           <button id="editBtn" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm">编辑</button>
-          <button id="deleteBtn" class="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg text-sm">删除</button>
+          <button id="deleteBtn" class="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg text-sm disabled:opacity-50 disabled:cursor-not-allowed">删除</button>
         </div>
       </div>
       <div class="content-area p-6">
@@ -1015,15 +1127,7 @@ function getOpenPage(meta) {
         </div>
         <div id="editMode" class="hidden">
           <div class="edit-settings bg-gray-100 rounded-lg px-4 py-3 mb-4 max-w-6xl mx-auto">
-            <div class="flex flex-wrap items-center gap-4">
-              <div class="flex items-center gap-2">
-                <label class="text-sm text-gray-600 whitespace-nowrap">修改访问密码</label>
-                <input type="password" id="editPassword" class="border border-gray-300 rounded-lg px-3 py-1.5 text-sm w-32 focus:ring-2 focus:ring-blue-500" placeholder="留空不变">
-                <label class="flex items-center gap-1 text-sm text-red-500 cursor-pointer select-none">
-                  <input type="checkbox" id="editClearPassword" class="h-3.5 w-3.5 accent-red-500">
-                  清除密码
-                </label>
-              </div>
+            <div class="flex flex-wrap items-center gap-4">${editPasswordHtml}
               <div class="flex items-center gap-2">
                 <label class="text-sm text-gray-600 whitespace-nowrap">过期时间</label>
                 <select id="editExpiresInDays" class="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:ring-2 focus:ring-blue-500"></select>
@@ -1041,13 +1145,14 @@ function getOpenPage(meta) {
             </div>
           </div>
           <div class="mt-4 flex space-x-2 max-w-6xl mx-auto">
-            <button id="saveBtn" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm">保存</button>
+            <button id="saveBtn" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm disabled:opacity-50 disabled:cursor-not-allowed">保存</button>
             <button id="cancelBtn" class="bg-gray-200 hover:bg-gray-300 text-gray-800 px-4 py-2 rounded-lg text-sm">取消</button>
           </div>
           <p id="editError" class="text-red-500 mt-3"></p>
         </div>
       </div>
     </div>
+    ${getFooterHtml()}
   </div>
 
   <script>
@@ -1056,16 +1161,53 @@ function getOpenPage(meta) {
     const enableMarkdown = ${enableMarkdown};
     const inlineContent = ${inlineContentJs};
     const createdAt = ${createdAt};
+    let updatedAt = ${updatedAt || createdAt};
     const createVerificationEnabled = ${createVerificationEnabled};
     let expiresInDays = ${expiresInDays};
-    // 显示创建时间：跟随查看者系统时区，并附带时区标识（如 GMT+8）；
+    // 显示创建与更新时间：跟随查看者系统时区，并附带时区标识（如 GMT+8）；
     // 服务端预渲染的 UTC 文本仅作为 JS 被禁用时的回退
-    document.getElementById('createdAtDisplay').textContent =
-      new Date(createdAt).toLocaleString(undefined, { timeZoneName: 'short' });
+    function formatLocalTime(ts) {
+      return new Date(ts).toLocaleString(undefined, { timeZoneName: 'short' });
+    }
+    document.getElementById('createdAtDisplay').textContent = formatLocalTime(createdAt);
+    document.getElementById('updatedAtDisplay').textContent = formatLocalTime(updatedAt);
     let currentPassword = '';
     let globalPassword = '';
     let originalContent = '';
     let renderAvailable = enableMarkdown;
+    let toastTimer = null;
+
+    function showToast(message) {
+      const toast = document.getElementById('toastBanner');
+      toast.textContent = message;
+      toast.classList.remove('hidden');
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => toast.classList.add('hidden'), 3500);
+    }
+
+    function confirmAction(title, message) {
+      return new Promise((resolve) => {
+        const modal = document.getElementById('confirmModal');
+        const titleEl = document.getElementById('confirmModalTitle');
+        const msgEl = document.getElementById('confirmModalMessage');
+        const okBtn = document.getElementById('confirmModalOk');
+        const cancelBtn = document.getElementById('confirmModalCancel');
+        titleEl.textContent = title;
+        msgEl.textContent = message;
+        modal.classList.remove('hidden');
+        function onKeyDown(e) {
+          if (e.key === 'Escape') close(false);
+        }
+        function close(result) {
+          modal.classList.add('hidden');
+          document.removeEventListener('keydown', onKeyDown);
+          resolve(result);
+        }
+        document.addEventListener('keydown', onKeyDown);
+        cancelBtn.onclick = () => close(false);
+        okBtn.onclick = () => close(true);
+      });
+    }
 
     let renderer = null;
     if (enableMarkdown) {
@@ -1095,11 +1237,12 @@ function getOpenPage(meta) {
         const seq = ++renderSeq;
         const rendered = await renderMarkdown(text);
         if (seq !== renderSeq) return; // 已有更新的渲染请求，丢弃本次结果
-        if (rendered !== null) {
-          container.innerHTML = window.DOMPurify ? window.DOMPurify.sanitize(rendered) : rendered;
+        if (rendered !== null && window.DOMPurify && typeof window.DOMPurify.sanitize === 'function') {
+          container.innerHTML = window.DOMPurify.sanitize(rendered);
         } else {
           container.textContent = text;
           if (!renderAvailable) showWarning('⚠️ Markdown 渲染器加载失败，已显示原始文本。');
+          else if (rendered !== null) showWarning('⚠️ 安全组件加载失败，为防止 XSS 已显示原始文本。');
           else showWarning('⚠️ 渲染时出现错误，已显示原始文本。');
         }
       } else {
@@ -1123,18 +1266,35 @@ function getOpenPage(meta) {
         opts.forEach(([v, t]) => { const o = document.createElement('option'); o.value = v; o.textContent = t; sel.appendChild(o); });
       }
       sel.value = expiresInDays;
-      document.getElementById('editPassword').value = '';
-      document.getElementById('editClearPassword').checked = false;
+      const editPwdEl = document.getElementById('editPassword');
+      const editClearEl = document.getElementById('editClearPassword');
+      if (editPwdEl) {
+        editPwdEl.value = '';
+        editPwdEl.disabled = false;
+      }
+      if (editClearEl) editClearEl.checked = false;
       document.getElementById('editContent').value = originalContent;
       updateEditPreview();
       document.getElementById('previewMode').classList.add('hidden');
       document.getElementById('editMode').classList.remove('hidden');
     }
 
-    // 全局创建密码验证（返回 Promise，确认则 resolve，取消则 reject）
+    // 勾选“清除密码”时禁用密码输入框，避免状态混淆
+    const editClearCheckbox = document.getElementById('editClearPassword');
+    if (editClearCheckbox) {
+      editClearCheckbox.addEventListener('change', (e) => {
+        const pwdEl = document.getElementById('editPassword');
+        if (!pwdEl) return;
+        pwdEl.disabled = e.target.checked;
+        if (e.target.checked) pwdEl.value = '';
+      });
+    }
+
+    // 全局创建密码验证（复用 /api/verify-create，不传 name 时仅校验密码不签发令牌）
     function promptGlobalPassword() {
       return new Promise((resolve, reject) => {
         const modal = document.getElementById('globalPasswordModal');
+        const form = document.getElementById('globalPasswordForm');
         const input = document.getElementById('globalPasswordInput');
         const errorEl = document.getElementById('globalPasswordError');
         const confirmBtn = document.getElementById('globalPasswordConfirm');
@@ -1144,9 +1304,20 @@ function getOpenPage(meta) {
         modal.classList.remove('hidden');
         input.focus();
         let checking = false;
-        function cleanup() { modal.classList.add('hidden'); }
+        function onKeyDown(e) {
+          if (e.key === 'Escape' && !checking) {
+            cleanup();
+            reject(new Error('取消'));
+          }
+        }
+        function cleanup() {
+          modal.classList.add('hidden');
+          document.removeEventListener('keydown', onKeyDown);
+        }
+        document.addEventListener('keydown', onKeyDown);
         cancelBtn.onclick = () => { cleanup(); reject(new Error('取消')); };
-        confirmBtn.onclick = async () => {
+        form.onsubmit = async (e) => {
+          e.preventDefault();
           if (checking) return;
           const pwd = input.value.trim();
           if (!pwd) { errorEl.textContent = '请输入密码'; errorEl.classList.remove('hidden'); return; }
@@ -1155,7 +1326,7 @@ function getOpenPage(meta) {
           confirmBtn.textContent = '验证中…';
           errorEl.classList.add('hidden');
           try {
-            const res = await fetch('/api/check-create-password', {
+            const res = await fetch('/api/verify-create', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ password: pwd })
@@ -1203,6 +1374,12 @@ function getOpenPage(meta) {
     }
 
     async function loadContent(password = '') {
+      const verifyBtn = document.getElementById('verifyBtn');
+      const pwdError = document.getElementById('passwordError');
+      if (verifyBtn) {
+        verifyBtn.disabled = true;
+        verifyBtn.textContent = '验证中…';
+      }
       try {
         const res = await fetch('/api/get', {
           method: 'POST',
@@ -1211,43 +1388,154 @@ function getOpenPage(meta) {
         });
         const data = await parseJson(res);
         if (res.ok) {
+          pwdError.textContent = '';
           displayContent(data.content);
         } else if (res.status === 401) {
           document.getElementById('passwordSection').classList.remove('hidden');
           document.getElementById('contentSection').classList.add('hidden');
-          document.getElementById('passwordError').textContent = data.error || '';
-        } else if (res.status === 403) {
-          document.getElementById('passwordError').textContent = data.error || '';
+          pwdError.textContent = data.error || '';
+        } else if (res.status === 403 || res.status === 429) {
+          pwdError.textContent = data.error || '';
         } else {
-          alert(data.error || '加载失败');
+          showToast(data.error || '加载失败');
         }
-      } catch (err) { alert('网络错误，请检查连接'); }
-    }
-
-    async function copyContent() {
-      try {
-        await navigator.clipboard.writeText(originalContent);
-        const btn = document.getElementById('copyBtn');
-        btn.textContent = '已复制';
-        setTimeout(() => btn.textContent = '复制', 2000);
       } catch (err) {
-        const textarea = document.createElement('textarea');
-        textarea.value = originalContent;
-        document.body.appendChild(textarea);
-        textarea.select();
-        document.execCommand('copy');
-        document.body.removeChild(textarea);
-        const btn = document.getElementById('copyBtn');
-        btn.textContent = '已复制';
-        setTimeout(() => btn.textContent = '复制', 2000);
+        if (!document.getElementById('passwordSection').classList.contains('hidden')) {
+          pwdError.textContent = '网络错误，请检查连接';
+        } else {
+          showToast('网络错误，请检查连接');
+        }
+      } finally {
+        if (verifyBtn) {
+          verifyBtn.disabled = false;
+          verifyBtn.textContent = '验证';
+        }
       }
     }
-
-    document.getElementById('verifyBtn').addEventListener('click', async () => {
+    document.getElementById('passwordForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
       const pwd = document.getElementById('passwordInput').value;
       if (!pwd) { document.getElementById('passwordError').textContent = '请输入密码'; return; }
       currentPassword = pwd;
       loadContent(pwd);
+    });
+
+    document.getElementById('copyBtn').addEventListener('click', copyContent);
+    document.getElementById('editBtn').addEventListener('click', async () => {
+      if (createVerificationEnabled) {
+        try { globalPassword = await promptGlobalPassword(); } catch (e) { return; }
+      }
+      showEditor();
+    });
+    document.getElementById('editContent').addEventListener('input', updateEditPreview);
+    document.getElementById('cancelBtn').addEventListener('click', showPreview);
+
+    document.getElementById('saveBtn').addEventListener('click', async () => {
+      const saveBtn = document.getElementById('saveBtn');
+      const content = document.getElementById('editContent').value;
+      if (content.length > 102400) {
+        document.getElementById('editError').textContent = '内容过长（最多 100KB）';
+        return;
+      }
+      const editPwdEl = document.getElementById('editPassword');
+      const editClearEl = document.getElementById('editClearPassword');
+      const newPassword = editPwdEl ? editPwdEl.value : '';
+      const clearPassword = editClearEl ? editClearEl.checked : false;
+      const editExpiresInDays = parseInt(document.getElementById('editExpiresInDays').value, 10);
+      document.getElementById('editError').textContent = '';
+
+      function buildBody() {
+        const b = { name, content, password: currentPassword, createPassword: globalPassword, expiresInDays: editExpiresInDays };
+        if (clearPassword) { b.newPassword = ''; }
+        else if (newPassword) { b.newPassword = newPassword; }
+        return b;
+      }
+
+      saveBtn.disabled = true;
+      saveBtn.textContent = '保存中…';
+      try {
+        let res = await fetch('/api/update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(buildBody())
+        });
+        let data = await parseJson(res);
+        // 全局密码错误 → 重新弹出密码框，不离开编辑页
+        while ((res.status === 401 || res.status === 403) && createVerificationEnabled && data.error && data.error.includes('全局创建密码')) {
+          try { globalPassword = await promptGlobalPassword(); } catch (e) { return; }
+          document.getElementById('editError').textContent = '';
+          res = await fetch('/api/update', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(buildBody())
+          });
+          data = await parseJson(res);
+        }
+        if (res.ok) {
+          originalContent = content;
+          expiresInDays = editExpiresInDays;
+          // 同步更新本地访问密码，避免本次页面内再次编辑/删除时仍提交旧密码
+          if (clearPassword) {
+            currentPassword = '';
+          } else if (newPassword) {
+            currentPassword = newPassword.trim() !== '' ? newPassword : '';
+          }
+          updatedAt = Date.now();
+          document.getElementById('updatedAtDisplay').textContent = formatLocalTime(updatedAt);
+          document.getElementById('updatedAtWrap').classList.remove('hidden');
+          document.getElementById('expiryText').textContent =
+            expiresInDays === 0 ? '永不删除' : expiresInDays + ' 天后自动删除';
+          showPreview();
+        } else {
+          document.getElementById('editError').textContent = data.error || '更新失败';
+        }
+      } catch (err) {
+        document.getElementById('editError').textContent = '网络错误，请检查连接';
+      } finally {
+        saveBtn.disabled = false;
+        saveBtn.textContent = '保存';
+      }
+    });
+
+    document.getElementById('deleteBtn').addEventListener('click', async () => {
+      const deleteBtn = document.getElementById('deleteBtn');
+      if (createVerificationEnabled) {
+        try { globalPassword = await promptGlobalPassword(); } catch (e) { return; }
+      }
+      const confirmed = await confirmAction('确认删除', '确定要删除这个剪贴板吗？此操作不可撤销。');
+      if (!confirmed) return;
+      deleteBtn.disabled = true;
+      deleteBtn.textContent = '删除中…';
+      try {
+        let res = await fetch('/api/delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, password: currentPassword, createPassword: globalPassword })
+        });
+        let data = await parseJson(res);
+        // 全局密码错误 → 重新弹出密码框确认后重试
+        while ((res.status === 401 || res.status === 403) && createVerificationEnabled && data.error && data.error.includes('全局创建密码')) {
+          try { globalPassword = await promptGlobalPassword(); } catch (e) { return; }
+          const reconfirmed = await confirmAction('确认删除', '确定要删除这个剪贴板吗？此操作不可撤销。');
+          if (!reconfirmed) return;
+          res = await fetch('/api/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, password: currentPassword, createPassword: globalPassword })
+          });
+          data = await parseJson(res);
+        }
+        if (res.ok) {
+          window.location.href = '/';
+        } else {
+          showToast(data.error || '删除失败');
+        }
+      } catch (err) {
+        showToast('网络错误，请检查连接');
+      } finally {
+        deleteBtn.disabled = false;
+        deleteBtn.textContent = '删除';
+      }
     });
 
     document.getElementById('copyBtn').addEventListener('click', copyContent);
@@ -1266,8 +1554,10 @@ function getOpenPage(meta) {
         document.getElementById('editError').textContent = '内容过长（最多 100KB）';
         return;
       }
-      const newPassword = document.getElementById('editPassword').value;
-      const clearPassword = document.getElementById('editClearPassword').checked;
+      const editPwdEl = document.getElementById('editPassword');
+      const editClearEl = document.getElementById('editClearPassword');
+      const newPassword = editPwdEl ? editPwdEl.value : '';
+      const clearPassword = editClearEl ? editClearEl.checked : false;
       const editExpiresInDays = parseInt(document.getElementById('editExpiresInDays').value, 10);
       document.getElementById('editError').textContent = '';
 
@@ -1371,14 +1661,27 @@ function getOpenPage(meta) {
     <div id="globalPasswordModal" class="hidden fixed inset-0 bg-black/50 flex items-center justify-center z-50">
       <div class="bg-white rounded-xl shadow-2xl p-6 w-full max-w-sm mx-4">
         <h3 class="text-lg font-semibold mb-4">需要全局创建密码</h3>
-        <input type="password" id="globalPasswordInput" class="w-full border border-gray-300 rounded-lg px-3 py-2 mb-4 focus:ring-2 focus:ring-blue-500" placeholder="请输入全局密码">
-        <p id="globalPasswordError" class="text-red-500 text-sm mb-4 hidden"></p>
+        <form id="globalPasswordForm">
+          <input type="password" id="globalPasswordInput" class="w-full border border-gray-300 rounded-lg px-3 py-2 mb-4 focus:ring-2 focus:ring-blue-500" placeholder="请输入全局密码">
+          <p id="globalPasswordError" class="text-red-500 text-sm mb-4 hidden"></p>
+          <div class="flex space-x-2 justify-end">
+            <button type="button" id="globalPasswordCancel" class="bg-gray-200 hover:bg-gray-300 text-gray-800 px-4 py-2 rounded-lg text-sm">取消</button>
+            <button type="submit" id="globalPasswordConfirm" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm disabled:opacity-50 disabled:cursor-not-allowed">确认</button>
+          </div>
+        </form>
+      </div>
+    </div>
+    <div id="confirmModal" class="hidden fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+      <div class="bg-white rounded-xl shadow-2xl p-6 w-full max-w-sm mx-4">
+        <h3 id="confirmModalTitle" class="text-lg font-semibold mb-2">确认操作</h3>
+        <p id="confirmModalMessage" class="text-sm text-gray-600 mb-5"></p>
         <div class="flex space-x-2 justify-end">
-          <button id="globalPasswordCancel" class="bg-gray-200 hover:bg-gray-300 text-gray-800 px-4 py-2 rounded-lg text-sm">取消</button>
-          <button id="globalPasswordConfirm" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm">确认</button>
+          <button type="button" id="confirmModalCancel" class="bg-gray-200 hover:bg-gray-300 text-gray-800 px-4 py-2 rounded-lg text-sm">取消</button>
+          <button type="button" id="confirmModalOk" class="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg text-sm">确认删除</button>
         </div>
       </div>
     </div>
+    <div id="toastBanner" class="hidden fixed bottom-6 right-6 bg-gray-900 text-white text-sm px-4 py-2.5 rounded-lg shadow-lg z-50 max-w-sm"></div>
   </body>
 </html>`;
 }
