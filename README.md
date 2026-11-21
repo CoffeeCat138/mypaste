@@ -42,7 +42,7 @@
 
 1. 登录 [Cloudflare Dashboard](https://dash.cloudflare.com)，进入 **Workers & Pages** → **D1**。
 2. 点击 **Create database**（例如命名为 `clipboard-db`），记下数据库 ID。
-3. 在数据库的 **Console** 中依次执行以下 SQL（如使用 Wrangler，也可直接执行项目迁移命令）：
+3. 在数据库的 **Console** 中依次执行以下 SQL：
 
 ```sql
 CREATE TABLE clipboards (
@@ -68,8 +68,7 @@ CREATE TABLE create_tokens (
 );
 ```
 
-> 使用 Wrangler CLI 时，可在 `wrangler.toml` 填入 `database_id` 后执行：
-> `npx wrangler d1 migrations apply DB --remote`
+
 
 ### 2. 部署 Worker
 
@@ -81,8 +80,6 @@ CREATE TABLE create_tokens (
 4. 在 **Settings** → **Variables and Secrets** 中按需添加下方环境变量。
 
 ### 3. 配置定时清理（Cron Trigger）
-
-如果通过 `wrangler.toml` 部署且已包含 `[triggers] crons = ["0 * * * *"]`，会自动生效。若通过 Dashboard 手动部署：
 
 1. 进入 Worker → **Settings** → **Trigger Events**（触发器）。
 2. 添加 Cron Trigger：`0 * * * *`（每小时整点清理一次过期剪贴板与过期令牌）。
@@ -145,13 +142,6 @@ CREATE TABLE create_tokens (
 如需调整默认过期天数或可选列表，请同步修改：
 - 后端 `index.js` 顶部的 `VALID_EXPIRY_DAYS` 和 `DEFAULT_EXPIRY_DAYS`；
 - 前端创建页 `#expiresInDays` 下拉框以及编辑页 `showEditor()` 中的 `opts` 数组。
-
-### 本地自动化测试
-如果项目包含 `test/index.test.js`（基于 Node 18+ 内置 `node:test` 与内存 D1 Mock），可直接运行：
-
-```bash
-node test/index.test.js   # 或 npm test
-```
 
 ---
 
